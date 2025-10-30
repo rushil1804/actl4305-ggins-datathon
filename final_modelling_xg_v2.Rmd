@@ -1,0 +1,2840 @@
+---
+title: "final_modelling_gbm_xg"
+author: "Michael Wang"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(gbm)
+library(caret)
+library(pROC)
+library(PRROC)
+library(pdp)
+library(xgboost)
+library(Matrix)
+library(fastDummies)
+```
+
+
+```{r}
+df <- read_csv('/Users/michaelwang/Desktop/unsw/unsw actl/4305/Assignment/git_folder/actl4305-ggins-datathon/final_modelling_data.csv')
+
+cols <- c("quote_price", "trip_start_month", "platform", "convert", "trip_length", "lead_length", "num_travellers", "median_age", "group_type", "Africa", "Europe", "Oceania", "Antarctica","North_America", "Central_America", "South_America", "Middle_East", "Central_Asia", "South_East_Asia", "South_Asia", "East_Asia", "Multi_Region", "snowsports_length", "snowsports_strength", "adventure_activities_length", "adventure_activities_strength", "cruise_cover_length", "cruise_cover_strength", "medical_conditions", "gadget_cover", "motorcycle_cover_length", "motorcycle_cover_strength", "rental_vehicle_excess_length", "rental_vehicle_excess_strength", "specified_items", "discount_category", "median_crime_index", "hdi_median", "extra_cancel_tier", "low_season", "medium_season", "high_season", "healthcare_index_mean", "sent_mean", "is_summer", "is_autumn", "is_winter", "is_spring")
+
+numerical_to_fact <- c("extra_cancel_tier")
+logical_to_numerical <- c("is_summer", "is_autumn", "is_winter", "is_spring")
+
+df_selected <- df %>%
+  select(all_of(cols)) %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(all_of(numerical_to_fact), as.factor)) %>%
+  mutate(across(all_of(logical_to_numerical), as.numeric)) %>%
+  select(-convert)
+
+set.seed(42)  # for reproducibility
+df_selected <- df_selected %>%
+  mutate(rand_noise = runif(n()))
+```
+
+
+<!--################################ GBMS ######################################## -->
+
+```{r}
+df_snow <- df_selected %>%
+  mutate(boost_chosen = if_else(snowsports_length > 0, 1, 0))
+
+leak_cols <- c("snowsports_length", "snowsports_strength")
+df_model_snow <- df_snow %>% select(-all_of(leak_cols))
+
+df_gbm_snow <- df_model_snow
+
+set.seed(45)
+index_gbm <- createDataPartition(df_gbm_snow$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_gbm_snow <- df_gbm_snow[index_gbm,]
+Test_Data_gbm_snow <- df_gbm_snow[-index_gbm,]
+```
+
+
+Tuning was done in modellingv6_michael_oct28_gbm.Rmd
+```{r}
+set.seed(456)
+
+pos_w <- sum(Train_Data_gbm_snow$boost_chosen == 0) /
+         sum(Train_Data_gbm_snow$boost_chosen == 1)
+
+w_snow <- ifelse(Train_Data_gbm_snow$boost_chosen == 1, pos_w, 1)
+
+gbm_best_snow <- gbm(
+  formula = boost_chosen ~ .,
+  data = Train_Data_gbm_snow,
+  n.trees = 2000,
+  interaction.depth = 7,
+  shrinkage = 0.01,
+  n.minobsinnode = 15,
+  bag.fraction = 0.8, 
+  train.fraction = 1,
+  weights = w_snow,
+  n.cores = NULL,
+  verbose = FALSE
+)  
+
+X_test <- Test_Data_gbm_snow %>% select(-boost_chosen)
+
+gbm_best_probpred_snow <- predict(gbm_best_snow,newdata = X_test,type = "response")
+
+roc_obj <- roc(response = Test_Data_gbm_snow$boost_chosen,
+                     predictor = gbm_best_probpred_snow,
+                     levels = c(0,1))
+pROC::auc(roc_obj)
+
+gbm2_best_class <- factor(ifelse(gbm_best_probpred_snow >= 0.5, "YES", "NO"),levels = c("NO","YES"))
+
+test_conf_matrix <- Test_Data_gbm_snow
+
+test_conf_matrix$boost_chosen <- factor(ifelse(test_conf_matrix$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+confusionMatrix(
+  data = gbm2_best_class,
+  reference = test_conf_matrix$boost_chosen,
+  positive = "YES"
+)
+```
+```{r}
+imp_vec <- gbm::relative.influence(
+  gbm_best_snow,
+  n.trees = gbm_best_snow$n.trees,
+  sort. = TRUE
+)
+
+# Inspect top features
+head(imp_vec, 20)
+
+# Pick top-k features for PDPs
+k <- 8
+top_feats <- names(imp_vec)[1:k]
+top_feats
+```
+
+```{r}
+par(mfcol = c(1, 2))
+par(mar = c(5, 7, 1, 1))
+
+# Plot for relative.influence
+invisible(summary(gbm_best_snow, cBars = 15, method = relative.influence, las = 2)) 
+#Note that invisible() function to prevent the R output from being displayed 
+
+# Plot for permutation.test.gbm
+invisible(summary(gbm_best_snow, cBars = 15, method = permutation.test.gbm,las = 2))
+
+# Reset the layout and plot margins to the default 
+par(mfcol = c(1, 1))
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+```
+
+
+
+Motorcycle Cover
+
+```{r}
+df_motor <- df_selected %>%
+  mutate(boost_chosen = if_else(motorcycle_cover_length > 0, 1, 0))
+
+leak_cols <- c("motorcycle_cover_length", "motorcycle_cover_strength")
+df_model_motor <- df_motor %>% select(-all_of(leak_cols))
+
+df_gbm_motor <- df_model_motor
+
+set.seed(45)
+index_gbm <- createDataPartition(df_gbm_motor$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_gbm_motor <- df_gbm_motor[index_gbm,]
+Test_Data_gbm_motor <- df_gbm_motor[-index_gbm,]
+```
+
+```{r}
+set.seed(456)
+
+pos_w <- sum(Train_Data_gbm_motor$boost_chosen == 0) /
+         sum(Train_Data_gbm_motor$boost_chosen == 1)
+
+w_motor <- ifelse(Train_Data_gbm_motor$boost_chosen == 1, pos_w, 1)
+
+gbm_best_motor <- gbm(
+  formula = boost_chosen ~ .,
+  data = Train_Data_gbm_motor,
+  n.trees = 2000,
+  interaction.depth = 7,
+  shrinkage = 0.01,
+  n.minobsinnode = 15,
+  bag.fraction = 0.8, 
+  train.fraction = 1,
+  weights = w_motor,
+  n.cores = NULL,
+  verbose = FALSE
+)  
+
+X_test <- Test_Data_gbm_motor %>% select(-boost_chosen)
+
+gbm_best_probpred_motor <- predict(gbm_best_motor,newdata = X_test,type = "response")
+
+roc_obj <- roc(response = Test_Data_gbm_motor$boost_chosen,
+                     predictor = gbm_best_probpred_motor,
+                     levels = c(0,1))
+pROC::auc(roc_obj)
+
+gbm2_best_class <- factor(ifelse(gbm_best_probpred_motor >= 0.5, "YES", "NO"),levels = c("NO","YES"))
+
+test_conf_matrix <- Test_Data_gbm_motor
+
+test_conf_matrix$boost_chosen <- factor(ifelse(test_conf_matrix$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+confusionMatrix(
+  data = gbm2_best_class,
+  reference = test_conf_matrix$boost_chosen,
+  positive = "YES"
+)
+```
+
+```{r}
+imp_vec <- gbm::relative.influence(
+  gbm_best_motor,
+  n.trees = gbm_best_motor$n.trees,
+  sort. = TRUE
+)
+
+# Inspect top features
+head(imp_vec, 20)
+
+# Pick top-k features for PDPs
+k <- 8
+top_feats <- names(imp_vec)[1:k]
+top_feats
+```
+
+
+```{r}
+par(mfcol = c(1, 2))
+par(mar = c(5, 7, 1, 1))
+
+# Plot for relative.influence
+invisible(summary(gbm_best_motor, cBars = 15, method = relative.influence, las = 2)) 
+#Note that invisible() function to prevent the R output from being displayed 
+
+# Plot for permutation.test.gbm
+invisible(summary(gbm_best_motor, cBars = 15, method = permutation.test.gbm,las = 2))
+
+# Reset the layout and plot margins to the default 
+par(mfcol = c(1, 1))
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+```
+
+
+
+```{r}
+df_rental <- df_selected %>%
+  mutate(boost_chosen = if_else(rental_vehicle_excess_length > 0, 1, 0))
+
+leak_cols <- c("rental_vehicle_excess_length", "rental_vehicle_excess_strength")
+df_model_rental <- df_rental %>% select(-all_of(leak_cols))
+
+df_gbm_rental <- df_model_rental
+
+set.seed(45)
+index_gbm <- createDataPartition(df_gbm_rental$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_gbm_rental <- df_gbm_rental[index_gbm,]
+Test_Data_gbm_rental <- df_gbm_rental[-index_gbm,]
+```
+
+```{r}
+set.seed(456)
+
+pos_w <- sum(Train_Data_gbm_rental$boost_chosen == 0) /
+         sum(Train_Data_gbm_rental$boost_chosen == 1)
+
+w_rental <- ifelse(Train_Data_gbm_rental$boost_chosen == 1, pos_w, 1)
+
+gbm_best_rental <- gbm(
+  formula = boost_chosen ~ .,
+  data = Train_Data_gbm_rental,
+  n.trees = 2000,
+  interaction.depth = 7,
+  shrinkage = 0.01,
+  n.minobsinnode = 15,
+  bag.fraction = 0.8, 
+  train.fraction = 1,
+  weights = w_rental,
+  n.cores = NULL,
+  verbose = FALSE
+)  
+
+X_test <- Test_Data_gbm_rental %>% select(-boost_chosen)
+
+gbm_best_probpred_rental <- predict(gbm_best_rental,newdata = X_test,type = "response")
+
+roc_obj <- roc(response = Test_Data_gbm_rental$boost_chosen,
+                     predictor = gbm_best_probpred_rental,
+                     levels = c(0,1))
+pROC::auc(roc_obj)
+
+gbm2_best_class <- factor(ifelse(gbm_best_probpred_rental >= 0.5, "YES", "NO"),levels = c("NO","YES"))
+
+test_conf_matrix <- Test_Data_gbm_rental
+
+test_conf_matrix$boost_chosen <- factor(ifelse(test_conf_matrix$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+confusionMatrix(data = gbm2_best_class,reference = test_conf_matrix$boost_chosen,positive = "YES")
+```
+
+
+```{r}
+imp_vec <- gbm::relative.influence(
+  gbm_best_motor,
+  n.trees = gbm_best_rental$n.trees,
+  sort. = TRUE
+)
+
+# Inspect top features
+head(imp_vec, 20)
+
+# Pick top-k features for PDPs
+k <- 8
+top_feats <- names(imp_vec)[1:k]
+top_feats
+```
+
+```{r}
+par(mfcol = c(1, 2))
+par(mar = c(5, 7, 1, 1))
+
+# Plot for relative.influence
+invisible(summary(gbm_best_rental, cBars = 15, method = relative.influence, las = 2)) 
+#Note that invisible() function to prevent the R output from being displayed 
+
+# Plot for permutation.test.gbm
+invisible(summary(gbm_best_rental, cBars = 15, method = permutation.test.gbm,las = 2))
+
+# Reset the layout and plot margins to the default 
+par(mfcol = c(1, 1))
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+```
+
+
+
+```{r}
+df_adventure <- df_selected %>%
+  mutate(boost_chosen = if_else(adventure_activities_length > 0, 1, 0))
+
+leak_cols <- c("adventure_activities_length", "adventure_activities_strength")
+df_model_adventure<- df_adventure %>% select(-all_of(leak_cols))
+
+df_gbm_adventure <- df_model_adventure
+
+set.seed(45)
+index_gbm <- createDataPartition(df_gbm_adventure$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_gbm_adventure <- df_gbm_adventure[index_gbm,]
+Test_Data_gbm_adventure <- df_gbm_adventure[-index_gbm,]
+```
+
+```{r}
+set.seed(456)
+
+pos_w <- sum(Train_Data_gbm_adventure$boost_chosen == 0) /
+         sum(Train_Data_gbm_adventure$boost_chosen == 1)
+
+w_adventure <- ifelse(Train_Data_gbm_adventure$boost_chosen == 1, pos_w, 1)
+
+gbm_best_adventure <- gbm(
+  formula = boost_chosen ~ .,
+  data = Train_Data_gbm_adventure,
+  n.trees = 2000,
+  interaction.depth = 7,
+  shrinkage = 0.01,
+  n.minobsinnode = 15,
+  bag.fraction = 0.8, 
+  train.fraction = 1,
+  weights = w_adventure,
+  n.cores = NULL,
+  verbose = FALSE
+)  
+
+X_test <- Test_Data_gbm_adventure %>% select(-boost_chosen)
+
+gbm_best_probpred_adventure <- predict(gbm_best_adventure,newdata = X_test,type = "response")
+
+roc_obj <- roc(response = Test_Data_gbm_adventure$boost_chosen,
+                     predictor = gbm_best_probpred_adventure,
+                     levels = c(0,1))
+pROC::auc(roc_obj)
+
+gbm2_best_class <- factor(ifelse(gbm_best_probpred_adventure >= 0.5, "YES", "NO"),levels = c("NO","YES"))
+
+test_conf_matrix <- Test_Data_gbm_adventure
+
+test_conf_matrix$boost_chosen <- factor(ifelse(test_conf_matrix$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+confusionMatrix(data = gbm2_best_class,reference = test_conf_matrix$boost_chosen,positive = "YES")
+```
+
+
+```{r}
+set.seed(456)
+
+gbm_best_ad_no_weights <- gbm(
+  formula = boost_chosen ~ .,
+  data = Train_Data_gbm_adventure,
+  n.trees = 2000,
+  interaction.depth = 7,
+  shrinkage = 0.01,
+  n.minobsinnode = 15,
+  bag.fraction = 0.8, 
+  train.fraction = 1,
+  n.cores = NULL,
+  verbose = FALSE
+)  
+
+X_test <- Test_Data_gbm_adventure %>% select(-boost_chosen)
+
+gbm_best_probpred_ad_no_weights <- predict(gbm_best_ad_no_weights,newdata = X_test,type = "response")
+
+roc_obj_no_weights <- roc(response = Test_Data_gbm_adventure$boost_chosen,
+                     predictor = gbm_best_probpred_ad_no_weights,
+                     levels = c(0,1))
+pROC::auc(roc_obj_no_weights)
+
+gbm2_best_class_no_weights <- factor(ifelse(gbm_best_probpred_extra_cancel_no_weights >= 0.5, "YES", "NO"),levels = c("NO","YES"))
+
+test_conf_matrix <- Test_Data_gbm_adventure
+
+test_conf_matrix$boost_chosen <- factor(ifelse(test_conf_matrix$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+confusionMatrix(data = gbm2_best_class_no_weights,reference = test_conf_matrix$boost_chosen,positive = "YES")
+```
+
+
+```{r}
+imp_vec <- gbm::relative.influence(
+  gbm_best_motor,
+  n.trees = gbm_best_adventure$n.trees,
+  sort. = TRUE
+)
+
+# Inspect top features
+head(imp_vec, 20)
+
+# Pick top-k features for PDPs
+k <- 8
+top_feats <- names(imp_vec)[1:k]
+top_feats
+```
+
+
+```{r}
+par(mfcol = c(1, 2))
+par(mar = c(5, 7, 1, 1))
+
+# Plot for relative.influence
+invisible(summary(gbm_best_adventure, cBars = 15, method = relative.influence, las = 2)) 
+#Note that invisible() function to prevent the R output from being displayed 
+
+# Plot for permutation.test.gbm
+invisible(summary(gbm_best_adventure, cBars = 15, method = permutation.test.gbm,las = 2))
+
+# Reset the layout and plot margins to the default 
+par(mfcol = c(1, 1))
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+```
+
+
+
+
+```{r}
+df_cruise <- df_selected %>%
+  mutate(boost_chosen = if_else(cruise_cover_length > 0, 1, 0))
+
+leak_cols <- c("cruise_cover_length", "cruise_cover_strength")
+df_model_cruise <- df_cruise %>% select(-all_of(leak_cols))
+
+df_gbm_cruise <- df_model_cruise
+
+set.seed(45)
+index_gbm <- createDataPartition(df_gbm_cruise$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_gbm_cruise <- df_gbm_cruise[index_gbm,]
+Test_Data_gbm_cruise <- df_gbm_cruise[-index_gbm,]
+```
+
+```{r}
+set.seed(456)
+
+pos_w <- sum(Train_Data_gbm_cruise$boost_chosen == 0) /
+         sum(Train_Data_gbm_cruise$boost_chosen == 1)
+
+w_cruise <- ifelse(Train_Data_gbm_cruise$boost_chosen == 1, pos_w, 1)
+
+gbm_best_cruise <- gbm(
+  formula = boost_chosen ~ .,
+  data = Train_Data_gbm_cruise,
+  n.trees = 2000,
+  interaction.depth = 7,
+  shrinkage = 0.01,
+  n.minobsinnode = 15,
+  bag.fraction = 0.8, 
+  train.fraction = 1,
+  weights = w_cruise,
+  n.cores = NULL,
+  verbose = FALSE
+)  
+
+X_test <- Test_Data_gbm_cruise %>% select(-boost_chosen)
+
+gbm_best_probpred_cruise <- predict(gbm_best_cruise,newdata = X_test,type = "response")
+
+roc_obj <- roc(response = Test_Data_gbm_cruise$boost_chosen,
+                     predictor = gbm_best_probpred_cruise,
+                     levels = c(0,1))
+pROC::auc(roc_obj)
+
+gbm2_best_class <- factor(
+  ifelse(gbm_best_probpred_cruise >= 0.5, "YES", "NO"),
+  levels = c("NO","YES")
+)
+
+test_conf_matrix <- Test_Data_gbm_cruise
+
+test_conf_matrix$boost_chosen <- factor(ifelse(test_conf_matrix$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+confusionMatrix(data = gbm2_best_class,reference = test_conf_matrix$boost_chosen,positive = "YES")
+```
+
+
+```{r}
+imp_vec <- gbm::relative.influence(
+  gbm_best_motor,
+  n.trees = gbm_best_cruise$n.trees,
+  sort. = TRUE
+)
+
+# Inspect top features
+head(imp_vec, 20)
+
+# Pick top-k features for PDPs
+k <- 8
+top_feats <- names(imp_vec)[1:k]
+top_feats
+```
+
+
+```{r}
+par(mfcol = c(1, 2))
+par(mar = c(5, 7, 1, 1))
+
+# Plot for relative.influence
+invisible(summary(gbm_best_cruise, cBars = 15, method = relative.influence, las = 2)) 
+#Note that invisible() function to prevent the R output from being displayed 
+
+# Plot for permutation.test.gbm
+invisible(summary(gbm_best_cruise, cBars = 15, method = permutation.test.gbm,las = 2))
+
+# Reset the layout and plot margins to the default 
+par(mfcol = c(1, 1))
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+```
+
+
+
+```{r}
+df_extra_cancel <- df_selected %>%
+  mutate(extra_cancel_tier = as.numeric(extra_cancel_tier) - 1) %>%
+  mutate(boost_chosen = if_else(extra_cancel_tier > 0, 1, 0)) %>%
+  select(-extra_cancel_tier)
+
+df_gbm_extra_cancel <- df_extra_cancel
+
+set.seed(45)
+index_gbm <- createDataPartition(df_gbm_extra_cancel$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_gbm_extra_cancel <- df_gbm_extra_cancel[index_gbm,]
+Test_Data_gbm_extra_cancel <- df_gbm_extra_cancel[-index_gbm,]
+```
+
+```{r}
+set.seed(456)
+
+pos_w <- sum(Train_Data_gbm_extra_cancel$boost_chosen == 0) /
+         sum(Train_Data_gbm_extra_cancel$boost_chosen == 1)
+
+w_extra_cancel <- ifelse(Train_Data_gbm_extra_cancel$boost_chosen == 1, pos_w, 1)
+
+gbm_best_extra_cancel <- gbm(
+  formula = boost_chosen ~ .,
+  data = Train_Data_gbm_extra_cancel,
+  n.trees = 2000,
+  interaction.depth = 7,
+  shrinkage = 0.01,
+  n.minobsinnode = 15,
+  bag.fraction = 0.8, 
+  train.fraction = 1,
+  weights = w_extra_cancel,
+  n.cores = NULL,
+  verbose = FALSE
+)  
+
+X_test <- Test_Data_gbm_extra_cancel %>% select(-boost_chosen)
+
+gbm_best_probpred_extra_cancel <- predict(gbm_best_extra_cancel,newdata = X_test,type = "response")
+
+roc_obj <- roc(response = Test_Data_gbm_extra_cancel$boost_chosen,
+                     predictor = gbm_best_probpred_extra_cancel,
+                     levels = c(0,1))
+pROC::auc(roc_obj)
+
+gbm2_best_class <- factor(ifelse(gbm_best_probpred_extra_cancel >= 0.5, "YES", "NO"),levels = c("NO","YES"))
+
+test_conf_matrix <- Test_Data_gbm_extra_cancel
+
+test_conf_matrix$boost_chosen <- factor(ifelse(test_conf_matrix$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+confusionMatrix(data = gbm2_best_class,reference = test_conf_matrix$boost_chosen,positive = "YES")
+```
+
+
+```{r}
+set.seed(456)
+
+gbm_best_extra_cancel_no_weights <- gbm(
+  formula = boost_chosen ~ .,
+  data = Train_Data_gbm_extra_cancel,
+  n.trees = 2000,
+  interaction.depth = 7,
+  shrinkage = 0.01,
+  n.minobsinnode = 15,
+  bag.fraction = 0.8, 
+  train.fraction = 1,
+  n.cores = NULL,
+  verbose = FALSE
+)  
+
+X_test <- Test_Data_gbm_extra_cancel %>% select(-boost_chosen)
+
+gbm_best_probpred_extra_cancel_no_weights <- predict(gbm_best_extra_cancel_no_weights,newdata = X_test,type = "response")
+
+roc_obj_no_weights <- roc(response = Test_Data_gbm_extra_cancel$boost_chosen,
+                     predictor = gbm_best_probpred_extra_cancel_no_weights,
+                     levels = c(0,1))
+pROC::auc(roc_obj_no_weights)
+
+gbm2_best_class_no_weights <- factor(ifelse(gbm_best_probpred_extra_cancel_no_weights >= 0.5, "YES", "NO"),levels = c("NO","YES"))
+
+test_conf_matrix <- Test_Data_gbm_extra_cancel
+
+test_conf_matrix$boost_chosen <- factor(ifelse(test_conf_matrix$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+confusionMatrix(data = gbm2_best_class_no_weights,reference = test_conf_matrix$boost_chosen,positive = "YES")
+```
+
+
+
+```{r}
+imp_vec <- gbm::relative.influence(
+  gbm_best_motor,
+  n.trees = gbm_best_extra_cancel$n.trees,
+  sort. = TRUE
+)
+
+# Inspect top features
+head(imp_vec, 20)
+
+# Pick top-k features for PDPs
+k <- 8
+top_feats <- names(imp_vec)[1:k]
+top_feats
+```
+
+
+```{r}
+par(mfcol = c(1, 2))
+par(mar = c(5, 7, 1, 1))
+
+# Plot for relative.influence
+invisible(summary(gbm_best_extra_cancel, cBars = 15, method = relative.influence, las = 2)) 
+#Note that invisible() function to prevent the R output from being displayed 
+
+# Plot for permutation.test.gbm
+invisible(summary(gbm_best_extra_cancel, cBars = 15, method = permutation.test.gbm,las = 2))
+
+# Reset the layout and plot margins to the default 
+par(mfcol = c(1, 1))
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+
+```
+
+
+
+```{r}
+set.seed(45)
+index_gbm <- createDataPartition(df_selected$specified_items, p = 0.8, list = FALSE)
+Train_Data_gbm_specified <- df_selected[index_gbm,]
+Test_Data_gbm_specified <- df_selected[-index_gbm,]
+
+set.seed(456)
+
+pos_w <- sum(Train_Data_gbm_specified$specified_items == 0) /
+  sum(Train_Data_gbm_specified$specified_items == 1)
+
+w_specified <- ifelse(Train_Data_gbm_specified$specified_items == 1, pos_w, 1)
+
+gbm_best_specified <- gbm(
+  formula = specified_items ~ .,
+  data = Train_Data_gbm_specified,
+  n.trees = 2000,
+  interaction.depth = 7,
+  shrinkage = 0.01,
+  n.minobsinnode = 15,
+  bag.fraction = 0.8, 
+  train.fraction = 1,
+  weights = w_specified,
+  n.cores = NULL,
+  verbose = FALSE
+)  
+
+X_test <- Test_Data_gbm_specified %>% select(-specified_items)
+
+gbm_best_probpred_specified <- predict(gbm_best_specified,newdata = X_test,type = "response")
+
+roc_obj <- roc(response = Test_Data_gbm_specified$specified_items,
+               predictor = gbm_best_probpred_specified,
+               levels = c(0,1))
+pROC::auc(roc_obj)
+
+gbm2_best_class <- factor(ifelse(gbm_best_probpred_specified >= 0.5, "YES", "NO"),levels = c("NO","YES"))
+
+test_conf_matrix <- Test_Data_gbm_specified
+
+test_conf_matrix$specified_items <- factor(ifelse(test_conf_matrix$specified_items == 1, "YES", "NO"), levels = c("NO","YES"))
+
+confusionMatrix(data = gbm2_best_class,reference = test_conf_matrix$specified_items,positive = "YES")
+
+imp_vec <- gbm::relative.influence(
+  gbm_best_motor,
+  n.trees = gbm_best_specified$n.trees,
+  sort. = TRUE
+)
+
+# Inspect top features
+head(imp_vec, 20)
+
+# Pick top-k features for PDPs
+k <- 8
+top_feats <- names(imp_vec)[1:k]
+top_feats
+
+par(mfcol = c(1, 2))
+par(mar = c(5, 7, 1, 1))
+
+# Plot for relative.influence
+invisible(summary(gbm_best_specified, cBars = 15, method = relative.influence, las = 2)) 
+#Note that invisible() function to prevent the R output from being displayed 
+
+# Plot for permutation.test.gbm
+invisible(summary(gbm_best_specified, cBars = 15, method = permutation.test.gbm,las = 2))
+
+# Reset the layout and plot margins to the default 
+par(mfcol = c(1, 1))
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+```
+
+```{r}
+set.seed(45)
+index_gbm <- createDataPartition(df_selected$gadget_cover, p = 0.8, list = FALSE)
+Train_Data_gbm_gadget <- df_selected[index_gbm,]
+Test_Data_gbm_gadget <- df_selected[-index_gbm,]
+
+set.seed(456)
+
+pos_w <- sum(Train_Data_gbm_gadget$gadget_cover == 0) /
+  sum(Train_Data_gbm_gadget$gadget_cover == 1)
+
+w_gadget <- ifelse(Train_Data_gbm_gadget$gadget_cover == 1, pos_w, 1)
+
+gbm_best_gadget <- gbm(
+  formula = gadget_cover ~ .,
+  data = Train_Data_gbm_gadget,
+  n.trees = 2000,
+  interaction.depth = 7,
+  shrinkage = 0.01,
+  n.minobsinnode = 15,
+  bag.fraction = 0.8, 
+  train.fraction = 1,
+  weights = w_gadget,
+  n.cores = NULL,
+  verbose = FALSE
+)  
+
+X_test <- Test_Data_gbm_gadget %>% select(-gadget_cover)
+
+gbm_best_probpred_gadget <- predict(gbm_best_gadget,newdata = X_test,type = "response")
+
+roc_obj <- roc(response = Test_Data_gbm_gadget$gadget_cover,
+               predictor = gbm_best_probpred_gadget,
+               levels = c(0,1))
+pROC::auc(roc_obj)
+
+gbm2_best_class <- factor(ifelse(gbm_best_probpred_gadget >= 0.5, "YES", "NO"),levels = c("NO","YES"))
+
+test_conf_matrix <- Test_Data_gbm_gadget
+
+test_conf_matrix$gadget_cover <- factor(ifelse(test_conf_matrix$gadget_cover == 1, "YES", "NO"), levels = c("NO","YES"))
+
+confusionMatrix(data = gbm2_best_class,reference = test_conf_matrix$gadget_cover,positive = "YES")
+
+imp_vec <- gbm::relative.influence(
+  gbm_best_motor,
+  n.trees = gbm_best_gadget$n.trees,
+  sort. = TRUE
+)
+
+# Inspect top features
+head(imp_vec, 20)
+
+# Pick top-k features for PDPs
+k <- 8
+top_feats <- names(imp_vec)[1:k]
+top_feats
+
+par(mfcol = c(1, 2))
+par(mar = c(5, 7, 1, 1))
+
+# Plot for relative.influence
+invisible(summary(gbm_best_gadget, cBars = 15, method = relative.influence, las = 2)) 
+#Note that invisible() function to prevent the R output from being displayed 
+
+# Plot for permutation.test.gbm
+invisible(summary(gbm_best_gadget, cBars = 15, method = permutation.test.gbm,las = 2))
+
+# Reset the layout and plot margins to the default 
+par(mfcol = c(1, 1))
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+
+```
+
+
+
+```{r}
+set.seed(45)
+index_gbm <- createDataPartition(df_selected$medical_conditions, p = 0.8, list = FALSE)
+Train_Data_gbm_medical <- df_selected[index_gbm,]
+Test_Data_gbm_medical <- df_selected[-index_gbm,]
+
+set.seed(456)
+
+pos_w <- sum(Train_Data_gbm_medical$medical_conditions == 0) /
+  sum(Train_Data_gbm_medical$medical_conditions == 1)
+
+w_medical <- ifelse(Train_Data_gbm_medical$medical_conditions == 1, pos_w, 1)
+
+gbm_best_medical <- gbm(
+  formula = medical_conditions ~ .,
+  data = Train_Data_gbm_medical,
+  n.trees = 2000,
+  interaction.depth = 7,
+  shrinkage = 0.01,
+  n.minobsinnode = 15,
+  bag.fraction = 0.8, 
+  train.fraction = 1,
+  weights = w_medical,
+  n.cores = NULL,
+  verbose = FALSE
+)  
+
+X_test <- Test_Data_gbm_medical %>% select(-medical_conditions)
+
+gbm_best_probpred_medical <- predict(gbm_best_medical,newdata = X_test,type = "response")
+
+roc_obj <- roc(response = Test_Data_gbm_medical$medical_conditions,
+               predictor = gbm_best_probpred_medical,
+               levels = c(0,1))
+pROC::auc(roc_obj)
+
+gbm2_best_class <- factor(ifelse(gbm_best_probpred_medical >= 0.5, "YES", "NO"),levels = c("NO","YES"))
+
+test_conf_matrix <- Test_Data_gbm_medical
+
+test_conf_matrix$medical_conditions <- factor(ifelse(test_conf_matrix$medical_conditions == 1, "YES", "NO"), levels = c("NO","YES"))
+
+confusionMatrix(data = gbm2_best_class,reference = test_conf_matrix$medical_conditions,positive = "YES")
+
+imp_vec <- gbm::relative.influence(
+  gbm_best_motor,
+  n.trees = gbm_best_medical$n.trees,
+  sort. = TRUE
+)
+
+# Inspect top features
+head(imp_vec, 20)
+
+# Pick top-k features for PDPs
+k <- 8
+top_feats <- names(imp_vec)[1:k]
+top_feats
+
+par(mfcol = c(1, 2))
+par(mar = c(5, 7, 1, 1))
+
+# Plot for relative.influence
+invisible(summary(gbm_best_medical, cBars = 15, method = relative.influence, las = 2)) 
+#Note that invisible() function to prevent the R output from being displayed 
+
+# Plot for permutation.test.gbm
+invisible(summary(gbm_best_medical, cBars = 15, method = permutation.test.gbm,las = 2))
+
+# Reset the layout and plot margins to the default 
+par(mfcol = c(1, 1))
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+
+```
+
+
+<!-- ############################# XGBOOST SECTION ###################### -->
+
+```{r}
+cat_cols <- c("platform", "group_type", "snowsports_strength", "adventure_activities_strength", "cruise_cover_strength", "motorcycle_cover_strength", "rental_vehicle_excess_strength", "discount_category", "extra_cancel_tier")
+
+df_xgboost <- df_selected %>%
+  dummy_cols(select_columns = cat_cols,
+             remove_selected_columns = TRUE,
+             remove_first_dummy = FALSE,
+             ignore_na = FALSE)
+```
+
+
+SNOW SPORTS
+
+```{r}
+df_snow_xg <- df_xgboost %>%
+  mutate(boost_chosen = if_else(snowsports_length > 0, 1, 0))
+
+leak_cols <- c("snowsports_length", "snowsports_strength_none", "snowsports_strength_moderate", "snowsports_strength_high", "snowsports_strength_full")
+df_model_snow_xg <- df_snow_xg %>% select(-all_of(leak_cols))
+
+df_xg_snow <- df_model_snow_xg
+
+set.seed(111)
+index_gbm_snow <- createDataPartition(df_xg_snow$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_xg_snow <- df_xg_snow[index_gbm_snow,]
+Test_Data_xg_snow <- df_xg_snow[-index_gbm_snow,]
+
+names(Train_Data_xg_snow) <- make.names(names(Train_Data_xg_snow), unique = TRUE)
+names(Test_Data_xg_snow)  <- make.names(names(Test_Data_xg_snow),  unique = TRUE)
+
+X_train_xg_snow <- sparse.model.matrix(boost_chosen ~ . - 1, data = Train_Data_xg_snow)
+y_train_xg_snow <- Train_Data_xg_snow$boost_chosen == 1
+dtrain_xg_snow  <- xgb.DMatrix(X_train_xg_snow, label = y_train_xg_snow)
+
+neg <- sum(y_train_xg_snow == 0); pos <- sum(y_train_xg_snow == 1)
+spw <- neg / pos
+
+grid_xg <- expand.grid(
+  eta              = c(0.05, 0.1),
+  max_depth        = c(6),
+  min_child_weight = c(5, 10),
+  subsample        = c(0.8),
+  colsample_bytree = c(0.8),
+  lambda           = c(1, 3)
+)
+
+best <- list(score = -Inf, iter = NA, params = NULL)
+
+for (i in seq_len(nrow(grid_xg))) {
+  p <- grid_xg[i, ]
+
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "aucpr",
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = p$lambda,
+    scale_pos_weight = spw
+  )
+
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain_xg_snow,
+    nrounds = 2000,
+    nfold = 5,
+    stratified = TRUE,
+    early_stopping_rounds = 200,
+    verbose = 0
+  )
+
+  score <- cv$evaluation_log$test_aucpr_mean[cv$best_iteration]
+  if (!is.na(score) && score > best$score) {
+    best$score <- score
+    best$iter  <- cv$best_iteration
+    best$params <- params
+  }
+}
+
+best$score
+best$iter
+best$params
+```
+
+
+
+```{r}
+set.seed(111)
+X_test_xg_snow <- sparse.model.matrix(boost_chosen ~ . - 1, data = Test_Data_xg_snow)
+dtest_xg_snow  <- xgb.DMatrix(X_test_xg_snow)
+
+final_fit_snow <- xgb.train(
+  params  = best$params,
+  data    = dtrain_xg_snow,
+  nrounds = best$iter,
+  verbose = 0
+)
+
+test_conf_matrix_xg_snow <- Test_Data_xg_snow
+
+test_conf_matrix_xg_snow$boost_chosen <- factor(ifelse(test_conf_matrix_xg_snow$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+pred_prob_xg_snow <- predict(final_fit_snow, dtest_xg_snow)
+pred_cls_xg_snow  <- factor(ifelse(pred_prob_xg_snow > 0.5, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_snow <- confusionMatrix(pred_cls_xg_snow, test_conf_matrix_xg_snow$boost_chosen, positive = "YES")
+cm_xg_snow
+```
+
+
+```{r}
+imp <- xgb.importance(
+  feature_names = colnames(X_train_xg_snow),
+  model = final_fit_snow
+)
+
+# Top 20 features (table)
+head(imp, 20)
+
+# Nice bar plot of the top features
+xgb.plot.importance(imp, top_n = 20)
+
+shap_mat <- predict(final_fit_snow, dtest_xg_snow, predcontrib = TRUE)
+
+shap_df <- as.data.frame(shap_mat)
+# Drop the BIAS term for per-feature summaries
+feat_cols <- setdiff(colnames(shap_df), "BIAS")
+
+# Mean |SHAP| per feature = global importance ranking
+avg_abs_shap <- sort(colMeans(abs(shap_df[ , feat_cols, drop = FALSE])), decreasing = TRUE)
+
+# View the top 20
+head(avg_abs_shap, 20)
+
+# Optional: quick ggplot bar chart of top 20 SHAP importances
+topN <- 20
+plot_df <- data.frame(
+  feature = names(avg_abs_shap)[1:topN],
+  mean_abs_shap = as.numeric(avg_abs_shap[1:topN])
+)
+ggplot(plot_df, aes(x = reorder(feature, mean_abs_shap), y = mean_abs_shap)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Feature", y = "Mean |SHAP|", title = "SHAP Feature Importance (Test Set)")
+```
+
+```{r}
+pr_auc_vec <- function(y_true, y_prob) {
+  fg <- y_prob[y_true == 1]
+  bg <- y_prob[y_true == 0]
+  pr.curve(scores.class0 = fg, scores.class1 = bg)$auc.integral
+}
+
+# Baseline PR-AUC on test
+y_true_snow <- Test_Data_xg_snow$boost_chosen
+X_test_snow <- as.data.frame(Test_Data_xg_snow)  # original test data frame (not the DMatrix)
+base_prob_snow <- pred_prob_xg_snow
+base_auc_snow <- pr_auc_vec(y_true_snow, base_prob_snow)
+
+set.seed(1)
+perm_drop <- sapply(setdiff(names(X_test_snow), "boost_chosen"), function(feat) {
+  X_perm <- X_test_snow
+  X_perm[[feat]] <- sample(X_perm[[feat]])  # permute single column
+
+  # Rebuild design matrix and predict
+  X_perm_mm <- sparse.model.matrix(boost_chosen ~ . - 1, data = X_perm)
+  d_perm <- xgb.DMatrix(X_perm_mm)
+  prob_perm <- predict(final_fit_snow, d_perm)
+
+  # PR-AUC drop
+  base_auc_snow - pr_auc_vec(y_true_snow, prob_perm)
+})
+
+# Larger drop = more important
+perm_importance <- sort(perm_drop, decreasing = TRUE)
+head(perm_importance, 20)
+```
+
+
+
+
+
+```{r}
+df_motor_xg <- df_xgboost %>%
+  mutate(boost_chosen = if_else(motorcycle_cover_length > 0, 1, 0))
+
+leak_cols <- c("motorcycle_cover_length", "motorcycle_cover_strength_none", "motorcycle_cover_strength_moderate", "motorcycle_cover_strength_high", "motorcycle_cover_strength_full")
+df_model_motor_xg <- df_motor_xg %>% select(-all_of(leak_cols))
+
+df_xg_motor <- df_model_motor_xg
+set.seed(115)
+index_gbm_motor <- createDataPartition(df_xg_motor$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_xg_motor <- df_xg_motor[index_gbm_motor,]
+Test_Data_xg_motor <- df_xg_motor[-index_gbm_motor,]
+
+names(Train_Data_xg_motor) <- make.names(names(Train_Data_xg_motor), unique = TRUE)
+names(Test_Data_xg_motor)  <- make.names(names(Test_Data_xg_motor),  unique = TRUE)
+
+X_train_xg_motor <- sparse.model.matrix(boost_chosen ~ . - 1, data = Train_Data_xg_motor)
+y_train_xg_motor <- Train_Data_xg_motor$boost_chosen == 1
+dtrain_xg_motor <- xgb.DMatrix(X_train_xg_motor, label = y_train_xg_motor)
+
+neg <- sum(y_train_xg_motor == 0); pos <- sum(y_train_xg_motor == 1)
+spw <- neg / pos
+
+grid_xg <- expand.grid(
+  eta              = c(0.05, 0.1),
+  max_depth        = c(6),
+  min_child_weight = c(5, 10),
+  subsample        = c(0.8),
+  colsample_bytree = c(0.8),
+  lambda           = c(1, 3)
+)
+
+best_motor <- list(score = -Inf, iter = NA, params = NULL)
+
+for (i in seq_len(nrow(grid_xg))) {
+  p <- grid_xg[i, ]
+
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "aucpr",     # good for imbalance
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = p$lambda,
+    scale_pos_weight = spw          # optional but recommended
+  )
+
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain_xg_motor,
+    nrounds = 2000,
+    nfold = 5,
+    stratified = TRUE,
+    early_stopping_rounds = 200,
+    verbose = 0
+  )
+
+  score <- cv$evaluation_log$test_aucpr_mean[cv$best_iteration]
+  if (!is.na(score) && score > best_motor$score) {
+    best_motor$score <- score
+    best_motor$iter  <- cv$best_iteration
+    best_motor$params <- params
+  }
+}
+
+best_motor$score
+best_motor$iter
+best_motor$params
+```
+
+
+```{r}
+set.seed(115)
+
+X_test_xg_motor <- sparse.model.matrix(boost_chosen ~ . - 1, data = Test_Data_xg_motor)
+dtest_xg_motor <- xgb.DMatrix(X_test_xg_motor)
+
+final_fit_motor <- xgb.train(
+  params  = best_motor$params,
+  data    = dtrain_xg_motor,
+  nrounds = best_motor$iter,
+  verbose = 0
+)
+
+test_conf_matrix_xg_motor <- Test_Data_xg_motor
+
+test_conf_matrix_xg_motor$boost_chosen <- factor(ifelse(test_conf_matrix_xg_motor$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+pred_prob_xg_motor <- predict(final_fit_motor, dtest_xg_motor)
+pred_cls_xg_motor <- factor(ifelse(pred_prob_xg_motor > 0.5, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_motor <- confusionMatrix(pred_cls_xg_motor, test_conf_matrix_xg_motor$boost_chosen, positive = "YES")
+cm_xg_motor
+```
+
+
+```{r}
+imp <- xgb.importance(
+  feature_names = colnames(X_train_xg_motor),
+  model = final_fit_motor
+)
+
+# Top 20 features (table)
+head(imp, 20)
+
+# Nice bar plot of the top features
+xgb.plot.importance(imp, top_n = 20)
+
+shap_mat <- predict(final_fit_motor, dtest_xg_motor, predcontrib = TRUE)
+
+shap_df <- as.data.frame(shap_mat)
+# Drop the BIAS term for per-feature summaries
+feat_cols <- setdiff(colnames(shap_df), "BIAS")
+
+# Mean |SHAP| per feature = global importance ranking
+avg_abs_shap <- sort(colMeans(abs(shap_df[ , feat_cols, drop = FALSE])), decreasing = TRUE)
+
+# View the top 20
+head(avg_abs_shap, 20)
+
+# Optional: quick ggplot bar chart of top 20 SHAP importances
+topN <- 20
+plot_df <- data.frame(
+  feature = names(avg_abs_shap)[1:topN],
+  mean_abs_shap = as.numeric(avg_abs_shap[1:topN])
+)
+ggplot(plot_df, aes(x = reorder(feature, mean_abs_shap), y = mean_abs_shap)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Feature", y = "Mean |SHAP|", title = "SHAP Feature Importance (Test Set)")
+```
+
+
+```{r}
+y_true_motor <- Test_Data_xg_motor$boost_chosen
+X_test_motor <- as.data.frame(Test_Data_xg_motor)  # original test data frame (not the DMatrix)
+base_prob_motor <- pred_prob_xg_motor
+base_auc_motor <- pr_auc_vec(y_true_motor, base_prob_motor)
+
+set.seed(1)
+perm_drop <- sapply(setdiff(names(X_test_motor), "boost_chosen"), function(feat) {
+  X_perm <- X_test_motor
+  X_perm[[feat]] <- sample(X_perm[[feat]])  # permute single column
+
+  # Rebuild design matrix and predict
+  X_perm_mm <- sparse.model.matrix(boost_chosen ~ . - 1, data = X_perm)
+  d_perm <- xgb.DMatrix(X_perm_mm)
+  prob_perm <- predict(final_fit_motor, d_perm)
+
+  # PR-AUC drop
+  base_auc_motor - pr_auc_vec(y_true_motor, prob_perm)
+})
+
+# Larger drop = more important
+perm_importance <- sort(perm_drop, decreasing = TRUE)
+head(perm_importance, 20)
+```
+
+
+
+```{r}
+df_rental_xg <- df_xgboost %>%
+  mutate(boost_chosen = if_else(rental_vehicle_excess_length > 0, 1, 0))
+
+leak_cols <- c("rental_vehicle_excess_length", "rental_vehicle_excess_strength_none", "rental_vehicle_excess_strength_moderate", "rental_vehicle_excess_strength_high", "rental_vehicle_excess_strength_full")
+df_model_rental_xg <- df_rental_xg %>% select(-all_of(leak_cols))
+
+df_xg_rental <- df_model_rental_xg
+
+set.seed(1113)
+index_gbm_rental <- createDataPartition(df_xg_rental$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_xg_rental <- df_xg_rental[index_gbm_rental,]
+Test_Data_xg_rental <- df_xg_rental[-index_gbm_rental,]
+
+names(Train_Data_xg_rental) <- make.names(names(Train_Data_xg_rental), unique = TRUE)
+names(Test_Data_xg_rental)  <- make.names(names(Test_Data_xg_rental),  unique = TRUE)
+
+X_train_xg_rental <- sparse.model.matrix(boost_chosen ~ . - 1, data = Train_Data_xg_rental)
+y_train_xg_rental <- Train_Data_xg_rental$boost_chosen == 1
+dtrain_xg_rental  <- xgb.DMatrix(X_train_xg_rental, label = y_train_xg_rental)
+
+neg <- sum(y_train_xg_rental == 0); pos <- sum(y_train_xg_rental == 1)
+spw <- neg / pos
+
+grid_xg <- expand.grid(
+  eta              = c(0.05, 0.1),
+  max_depth        = c(6),
+  min_child_weight = c(5, 10),
+  subsample        = c(0.8),
+  colsample_bytree = c(0.8),
+  lambda           = c(1, 3)
+)
+
+best_rental <- list(score = -Inf, iter = NA, params = NULL)
+
+for (i in seq_len(nrow(grid_xg))) {
+  p <- grid_xg[i, ]
+
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "aucpr",     # good for imbalance
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = p$lambda,
+    scale_pos_weight = spw          # optional but recommended
+  )
+
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain_xg_rental,
+    nrounds = 2000,
+    nfold = 5,
+    stratified = TRUE,
+    early_stopping_rounds = 200,
+    verbose = 0
+  )
+
+  score <- cv$evaluation_log$test_aucpr_mean[cv$best_iteration]
+  if (!is.na(score) && score > best_rental$score) {
+    best_rental$score <- score
+    best_rental$iter  <- cv$best_iteration
+    best_rental$params <- params
+  }
+}
+
+best_rental$score
+best_rental$iter
+best_rental$params
+```
+
+
+
+```{r}
+X_test_xg_rental <- sparse.model.matrix(boost_chosen ~ . - 1, data = Test_Data_xg_rental)
+dtest_xg_rental <- xgb.DMatrix(X_test_xg_rental)
+
+final_fit_rental <- xgb.train(
+  params  = best_rental$params,
+  data    = dtrain_xg_rental,
+  nrounds = best_motor$iter,
+  verbose = 0
+)
+
+test_conf_matrix_xg_rental <- Test_Data_xg_rental
+
+test_conf_matrix_xg_rental$boost_chosen <- factor(ifelse(test_conf_matrix_xg_rental$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+pred_prob_xg_rental <- predict(final_fit_rental, dtest_xg_rental)
+pred_cls_xg_rental <- factor(ifelse(pred_prob_xg_rental > 0.5, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_rental <- confusionMatrix(pred_cls_xg_rental, test_conf_matrix_xg_rental$boost_chosen, positive = "YES")
+cm_xg_rental
+```
+
+
+```{r}
+imp <- xgb.importance(
+  feature_names = colnames(X_train_xg_rental),
+  model = final_fit_rental
+)
+
+# Top 20 features (table)
+head(imp, 20)
+
+# Nice bar plot of the top features
+xgb.plot.importance(imp, top_n = 20)
+
+shap_mat <- predict(final_fit_rental, dtest_xg_rental, predcontrib = TRUE)
+
+shap_df <- as.data.frame(shap_mat)
+# Drop the BIAS term for per-feature summaries
+feat_cols <- setdiff(colnames(shap_df), "BIAS")
+
+# Mean |SHAP| per feature = global importance ranking
+avg_abs_shap <- sort(colMeans(abs(shap_df[ , feat_cols, drop = FALSE])), decreasing = TRUE)
+
+# View the top 20
+head(avg_abs_shap, 20)
+
+# Optional: quick ggplot bar chart of top 20 SHAP importances
+topN <- 20
+plot_df <- data.frame(
+  feature = names(avg_abs_shap)[1:topN],
+  mean_abs_shap = as.numeric(avg_abs_shap[1:topN])
+)
+ggplot(plot_df, aes(x = reorder(feature, mean_abs_shap), y = mean_abs_shap)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Feature", y = "Mean |SHAP|", title = "SHAP Feature Importance (Test Set)")
+```
+
+
+```{r}
+y_true_rental <- Test_Data_xg_rental$boost_chosen
+X_test_rental <- as.data.frame(Test_Data_xg_rental)  # original test data frame (not the DMatrix)
+base_prob_rental <- pred_prob_xg_rental
+base_auc_rental <- pr_auc_vec(y_true_rental, base_prob_rental)
+
+set.seed(1)
+perm_drop <- sapply(setdiff(names(X_test_rental), "boost_chosen"), function(feat) {
+  X_perm <- X_test_rental
+  X_perm[[feat]] <- sample(X_perm[[feat]])  # permute single column
+
+  # Rebuild design matrix and predict
+  X_perm_mm <- sparse.model.matrix(boost_chosen ~ . - 1, data = X_perm)
+  d_perm <- xgb.DMatrix(X_perm_mm)
+  prob_perm <- predict(final_fit_rental, d_perm)
+
+  # PR-AUC drop
+  base_auc_rental - pr_auc_vec(y_true_rental, prob_perm)
+})
+
+# Larger drop = more important
+perm_importance <- sort(perm_drop, decreasing = TRUE)
+head(perm_importance, 20)
+```
+
+
+```{r}
+df_adventure_xg <- df_xgboost %>%
+  mutate(boost_chosen = if_else(adventure_activities_length > 0, 1, 0))
+
+leak_cols <- c("adventure_activities_length", "adventure_activities_strength_none", "adventure_activities_strength_moderate", "adventure_activities_strength_high", "adventure_activities_strength_full")
+df_model_adventure_xg <- df_adventure_xg %>% select(-all_of(leak_cols))
+
+df_xg_adventure <- df_model_adventure_xg
+
+set.seed(1111)
+index_gbm_adventure <- createDataPartition(df_xg_adventure$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_xg_adventure <- df_xg_adventure[index_gbm_adventure,]
+Test_Data_xg_adventure <- df_xg_adventure[-index_gbm_adventure,]
+
+names(Train_Data_xg_adventure) <- make.names(names(Train_Data_xg_adventure), unique = TRUE)
+names(Test_Data_xg_adventure)  <- make.names(names(Test_Data_xg_adventure),  unique = TRUE)
+
+X_train_xg_adventure <- sparse.model.matrix(boost_chosen ~ . - 1, data = Train_Data_xg_adventure)
+y_train_xg_adventure <- Train_Data_xg_adventure$boost_chosen == 1
+dtrain_xg_adventure <- xgb.DMatrix(X_train_xg_adventure, label = y_train_xg_adventure)
+
+neg <- sum(y_train_xg_adventure == 0); pos <- sum(y_train_xg_adventure == 1)
+spw <- neg / pos
+
+grid_xg <- expand.grid(
+  eta              = c(0.05, 0.1),
+  max_depth        = c(6, 7),
+  min_child_weight = c(5, 10, 15),
+  subsample        = c(0.8),
+  colsample_bytree = c(0.8),
+  lambda           = c(1, 3)
+)
+
+best_adventure <- list(score = -Inf, iter = NA, params = NULL)
+
+for (i in seq_len(nrow(grid_xg))) {
+  p <- grid_xg[i, ]
+
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "aucpr",     # good for imbalance
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = p$lambda,
+    scale_pos_weight = spw          # optional but recommended
+  )
+
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain_xg_adventure,
+    nrounds = 2000,
+    nfold = 5,
+    stratified = TRUE,
+    early_stopping_rounds = 200,
+    verbose = 0
+  )
+
+  score <- cv$evaluation_log$test_aucpr_mean[cv$best_iteration]
+  if (!is.na(score) && score > best_adventure$score) {
+    best_adventure$score <- score
+    best_adventure$iter  <- cv$best_iteration
+    best_adventure$params <- params
+  }
+}
+
+best_adventure$score
+best_adventure$iter
+best_adventure$params
+```
+
+
+
+```{r}
+X_test_xg_adventure <- sparse.model.matrix(boost_chosen ~ . - 1, data = Test_Data_xg_adventure)
+dtest_xg_adventure <- xgb.DMatrix(X_test_xg_adventure)
+
+final_fit_adventure <- xgb.train(
+  params  = best_adventure$params,
+  data    = dtrain_xg_adventure,
+  nrounds = best_adventure$iter,
+  verbose = 0
+)
+
+test_conf_matrix_xg_adventure <- Test_Data_xg_adventure
+
+test_conf_matrix_xg_adventure$boost_chosen <- factor(ifelse(test_conf_matrix_xg_adventure$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+pred_prob_xg_adventure <- predict(final_fit_adventure, dtest_xg_adventure)
+pred_cls_xg_adventure  <- factor(ifelse(pred_prob_xg_adventure > 0.5, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_adventure <- confusionMatrix(pred_cls_xg_adventure, test_conf_matrix_xg_adventure$boost_chosen, positive = "YES")
+cm_xg_adventure
+```
+
+
+```{r}
+imp <- xgb.importance(
+  feature_names = colnames(dtest_xg_adventure),
+  model = final_fit_adventure
+)
+
+# Top 20 features (table)
+head(imp, 20)
+
+# Nice bar plot of the top features
+xgb.plot.importance(imp, top_n = 20)
+
+shap_mat <- predict(final_fit_adventure, dtest_xg_adventure, predcontrib = TRUE)
+
+shap_df <- as.data.frame(shap_mat)
+# Drop the BIAS term for per-feature summaries
+feat_cols <- setdiff(colnames(shap_df), "BIAS")
+
+# Mean |SHAP| per feature = global importance ranking
+avg_abs_shap <- sort(colMeans(abs(shap_df[ , feat_cols, drop = FALSE])), decreasing = TRUE)
+
+# View the top 20
+head(avg_abs_shap, 20)
+
+# Optional: quick ggplot bar chart of top 20 SHAP importances
+topN <- 20
+plot_df <- data.frame(
+  feature = names(avg_abs_shap)[1:topN],
+  mean_abs_shap = as.numeric(avg_abs_shap[1:topN])
+)
+
+ggplot(plot_df, aes(x = reorder(feature, mean_abs_shap), y = mean_abs_shap)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Feature", y = "Mean |SHAP|", title = "SHAP Feature Importance (Test Set)")
+```
+
+```{r}
+y_true_adventure <- Test_Data_xg_adventure$boost_chosen
+X_test_adventure <- as.data.frame(Test_Data_xg_adventure)  # original test data frame (not the DMatrix)
+base_prob_adventure <- pred_prob_xg_adventure
+base_auc_adventure <- pr_auc_vec(y_true_adventure, base_prob_adventure)
+
+set.seed(1)
+perm_drop <- sapply(setdiff(names(X_test_adventure), "boost_chosen"), function(feat) {
+  X_perm <- X_test_adventure
+  X_perm[[feat]] <- sample(X_perm[[feat]])  # permute single column
+
+  # Rebuild design matrix and predict
+  X_perm_mm <- sparse.model.matrix(boost_chosen ~ . - 1, data = X_perm)
+  d_perm <- xgb.DMatrix(X_perm_mm)
+  prob_perm <- predict(final_fit_adventure, d_perm)
+
+  # PR-AUC drop
+  base_auc_adventure - pr_auc_vec(y_true_adventure, prob_perm)
+})
+
+# Larger drop = more important
+perm_importance <- sort(perm_drop, decreasing = TRUE)
+head(perm_importance, 20)
+```
+
+
+```{r}
+set.seed(111)
+params_test1 <- list(
+  objective        = "binary:logistic",
+  eval_metric      = "aucpr",
+  eta              = 0.05,
+  max_depth        = 6,
+  min_child_weight = 10,
+  subsample        = 0.8,
+  colsample_bytree = 0.8,
+  lambda           = 3,
+  scale_pos_weight = spw
+)
+
+final_fit_adventure_test1 <- xgb.train(
+  params  = params_test1,
+  data    = dtrain_xg_adventure,
+  nrounds = best_adventure$iter,
+  verbose = 0
+)
+
+pred_prob_xg_adventure_test1 <- predict(final_fit_adventure_test1, dtest_xg_adventure)
+pred_cls_xg_adventure_test1 <- factor(ifelse(pred_prob_xg_adventure_test1 > 0.02, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_adventure_test1 <- confusionMatrix(pred_cls_xg_adventure_test1, test_conf_matrix_xg_adventure$boost_chosen, positive = "YES")
+cm_xg_adventure_test1
+
+```
+
+
+```{r}
+set.seed(111)
+params_test2 <- list(
+  objective        = "binary:logistic",
+  eval_metric      = "auc",
+  eta              = 0.05,
+  max_depth        = 6,
+  min_child_weight = 10,
+  subsample        = 0.8,
+  colsample_bytree = 0.8,
+  lambda           = 3
+)
+
+final_fit_adventure_test2 <- xgb.train(
+  params  = params_test2,
+  data    = dtrain_xg_adventure,
+  nrounds = best_adventure$iter,
+  verbose = 0
+)
+
+pred_prob_xg_adventure_test2 <- predict(final_fit_adventure_test2, dtest_xg_adventure)
+pred_cls_xg_adventure_test2 <- factor(ifelse(pred_prob_xg_adventure_test2 > 0.02, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_adventure_test2 <- confusionMatrix(pred_cls_xg_adventure_test2, test_conf_matrix_xg_adventure$boost_chosen, positive = "YES")
+cm_xg_adventure_test2
+```
+
+
+
+
+```{r}
+df_cruise_xg <- df_xgboost %>%
+  mutate(boost_chosen = if_else(cruise_cover_length > 0, 1, 0))
+
+leak_cols <- c("cruise_cover_length", "cruise_cover_strength_none", "cruise_cover_strength_partial", "cruise_cover_strength_full")
+df_model_cruise_xg <- df_cruise_xg %>% select(-all_of(leak_cols))
+
+df_xg_cruise <- df_model_cruise_xg
+
+set.seed(112)
+index_gbm_cruise <- createDataPartition(df_xg_cruise$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_xg_cruise <- df_xg_cruise[index_gbm_cruise,]
+Test_Data_xg_cruise <- df_xg_cruise[-index_gbm_cruise,]
+
+names(Train_Data_xg_cruise) <- make.names(names(Train_Data_xg_cruise), unique = TRUE)
+names(Test_Data_xg_cruise)  <- make.names(names(Test_Data_xg_cruise),  unique = TRUE)
+
+X_train_xg_cruise <- sparse.model.matrix(boost_chosen ~ . - 1, data = Train_Data_xg_cruise)
+y_train_xg_cruise <- Train_Data_xg_cruise$boost_chosen == 1
+dtrain_xg_cruise <- xgb.DMatrix(X_train_xg_cruise, label = y_train_xg_cruise)
+
+neg <- sum(y_train_xg_cruise == 0); pos <- sum(y_train_xg_cruise == 1)
+spw <- neg / pos
+
+grid_xg <- expand.grid(
+  eta              = c(0.05, 0.1),
+  max_depth        = c(6),
+  min_child_weight = c(5, 10),
+  subsample        = c(0.8),
+  colsample_bytree = c(0.8),
+  lambda           = c(1, 3)
+)
+
+best_cruise <- list(score = -Inf, iter = NA, params = NULL)
+
+for (i in seq_len(nrow(grid_xg))) {
+  p <- grid_xg[i, ]
+
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "aucpr",     # good for imbalance
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = p$lambda,
+    scale_pos_weight = spw          # optional but recommended
+  )
+
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain_xg_cruise,
+    nrounds = 2000,
+    nfold = 5,
+    stratified = TRUE,
+    early_stopping_rounds = 200,
+    verbose = 0
+  )
+
+  score <- cv$evaluation_log$test_aucpr_mean[cv$best_iteration]
+  if (!is.na(score) && score > best_cruise$score) {
+    best_cruise$score <- score
+    best_cruise$iter  <- cv$best_iteration
+    best_cruise$params <- params
+  }
+}
+
+best_cruise$score
+best_cruise$iter
+best_cruise$params
+```
+
+
+
+```{r}
+X_test_xg_cruise <- sparse.model.matrix(boost_chosen ~ . - 1, data = Test_Data_xg_cruise)
+dtest_xg_cruise  <- xgb.DMatrix(X_test_xg_cruise)
+
+final_fit_cruise <- xgb.train(
+  params  = best_cruise$params,
+  data    = dtrain_xg_cruise,
+  nrounds = best_cruise$iter,
+  verbose = 0
+)
+
+test_conf_matrix_xg_cruise <- Test_Data_xg_cruise
+
+test_conf_matrix_xg_cruise$boost_chosen <- factor(ifelse(test_conf_matrix_xg_cruise$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+pred_prob_xg_cruise <- predict(final_fit_cruise, dtest_xg_cruise)
+pred_cls_xg_cruise <- factor(ifelse(pred_prob_xg_cruise > 0.5, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_cruise <- confusionMatrix(pred_cls_xg_cruise, test_conf_matrix_xg_cruise$boost_chosen, positive = "YES")
+cm_xg_cruise
+```
+
+
+
+```{r}
+imp <- xgb.importance(
+  feature_names = colnames(X_train_xg_cruise),
+  model = final_fit_cruise
+)
+
+# Top 20 features (table)
+head(imp, 20)
+
+# Nice bar plot of the top features
+xgb.plot.importance(imp, top_n = 20)
+
+shap_mat <- predict(final_fit_cruise, dtest_xg_cruise, predcontrib = TRUE)
+
+shap_df <- as.data.frame(shap_mat)
+
+# Drop the BIAS term for per-feature summaries
+feat_cols <- setdiff(colnames(shap_df), "BIAS")
+
+# Mean |SHAP| per feature = global importance ranking
+avg_abs_shap <- sort(colMeans(abs(shap_df[ , feat_cols, drop = FALSE])), decreasing = TRUE)
+
+# View the top 20
+head(avg_abs_shap, 20)
+
+# Optional: quick ggplot bar chart of top 20 SHAP importances
+
+topN <- 20
+plot_df <- data.frame(
+  feature = names(avg_abs_shap)[1:topN],
+  mean_abs_shap = as.numeric(avg_abs_shap[1:topN])
+)
+ggplot(plot_df, aes(x = reorder(feature, mean_abs_shap), y = mean_abs_shap)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Feature", y = "Mean |SHAP|", title = "SHAP Feature Importance (Test Set)")
+```
+
+
+```{r}
+y_true_cruise <- Test_Data_xg_cruise$boost_chosen
+X_test_cruise <- as.data.frame(Test_Data_xg_cruise)  # original test data frame (not the DMatrix)
+base_prob_cruise <- pred_prob_xg_cruise
+base_auc_cruise <- pr_auc_vec(y_true_cruise, base_prob_cruise)
+
+set.seed(1)
+perm_drop <- sapply(setdiff(names(X_test_cruise), "boost_chosen"), function(feat) {
+  X_perm <- X_test_cruise
+  X_perm[[feat]] <- sample(X_perm[[feat]])  # permute single column
+
+  # Rebuild design matrix and predict
+  X_perm_mm <- sparse.model.matrix(boost_chosen ~ . - 1, data = X_perm)
+  d_perm <- xgb.DMatrix(X_perm_mm)
+  prob_perm <- predict(final_fit_cruise, d_perm)
+
+  # PR-AUC drop
+  base_auc_cruise - pr_auc_vec(y_true_cruise, prob_perm)
+})
+
+# Larger drop = more important
+perm_importance <- sort(perm_drop, decreasing = TRUE)
+head(perm_importance, 20)
+```
+
+```{r}
+df_extra_cancel_xg <- df_xgboost %>%
+  mutate(boost_chosen = if_else(extra_cancel_tier_0 == 0, 1, 0))
+
+leak_cols <- c("extra_cancel_tier_0", "extra_cancel_tier_1", "extra_cancel_tier_2")
+df_model_extra_cancel_xg <- df_extra_cancel_xg %>% select(-all_of(leak_cols))
+
+df_xg_extra_cancel <- df_model_extra_cancel_xg
+
+set.seed(101)
+index_gbm_extra_cancel <- createDataPartition(df_xg_extra_cancel$boost_chosen, p = 0.8, list = FALSE)
+Train_Data_xg_extra_cancel <- df_xg_extra_cancel[index_gbm_extra_cancel,]
+Test_Data_xg_extra_cancel <- df_xg_extra_cancel[-index_gbm_extra_cancel,]
+
+names(Train_Data_xg_extra_cancel) <- make.names(names(Train_Data_xg_extra_cancel), unique = TRUE)
+names(Test_Data_xg_extra_cancel)  <- make.names(names(Test_Data_xg_extra_cancel),  unique = TRUE)
+
+X_train_xg_extra_cancel <- sparse.model.matrix(boost_chosen ~ . - 1, data = Train_Data_xg_extra_cancel)
+y_train_xg_extra_cancel <- Train_Data_xg_extra_cancel$boost_chosen == 1
+dtrain_xg_extra_cancel <- xgb.DMatrix(X_train_xg_extra_cancel, label = y_train_xg_extra_cancel)
+
+neg <- sum(y_train_xg_extra_cancel == 0); pos <- sum(y_train_xg_extra_cancel == 1)
+spw <- neg / pos
+
+grid_xg <- expand.grid(
+  eta              = c(0.05, 0.1),
+  max_depth        = c(6),
+  min_child_weight = c(5, 10),
+  subsample        = c(0.8),
+  colsample_bytree = c(0.8),
+  lambda           = c(1, 3)
+)
+
+best_extra_cancel <- list(score = -Inf, iter = NA, params = NULL)
+
+for (i in seq_len(nrow(grid_xg))) {
+  p <- grid_xg[i, ]
+
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "aucpr",     # good for imbalance
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = p$lambda,
+    scale_pos_weight = spw          # optional but recommended
+  )
+
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain_xg_extra_cancel,
+    nrounds = 2000,
+    nfold = 5,
+    stratified = TRUE,
+    early_stopping_rounds = 200,
+    verbose = 0
+  )
+
+  score <- cv$evaluation_log$test_aucpr_mean[cv$best_iteration]
+  if (!is.na(score) && score > best_extra_cancel$score) {
+    best_extra_cancel$score <- score
+    best_extra_cancel$iter  <- cv$best_iteration
+    best_extra_cancel$params <- params
+  }
+}
+
+best_extra_cancel$score
+best_extra_cancel$iter
+best_extra_cancel$params
+```
+
+
+```{r}
+X_test_xg_extra_cancel <- sparse.model.matrix(boost_chosen ~ . - 1, data = Test_Data_xg_extra_cancel)
+dtest_xg_extra_cancel <- xgb.DMatrix(X_test_xg_extra_cancel)
+
+final_fit_extra_cancel <- xgb.train(
+  params  = best_extra_cancel$params,
+  data    = dtrain_xg_extra_cancel,
+  nrounds = best_extra_cancel$iter,
+  verbose = 0
+)
+
+test_conf_matrix_xg_extra_cancel <- Test_Data_xg_extra_cancel
+
+test_conf_matrix_xg_extra_cancel$boost_chosen <- factor(ifelse(test_conf_matrix_xg_extra_cancel$boost_chosen == 1, "YES", "NO"), levels = c("NO","YES"))
+
+pred_prob_xg_extra_cancel <- predict(final_fit_extra_cancel, dtest_xg_extra_cancel)
+pred_cls_xg_extra_cancel <- factor(ifelse(pred_prob_xg_extra_cancel > 0.5, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_extra_cancel <- confusionMatrix(pred_cls_xg_extra_cancel, test_conf_matrix_xg_extra_cancel$boost_chosen, positive = "YES")
+cm_xg_extra_cancel
+```
+
+
+```{r}
+imp <- xgb.importance(
+  feature_names = colnames(X_train_xg_extra_cancel),
+  model = final_fit_extra_cancel
+)
+
+# Top 20 features (table)
+head(imp, 20)
+
+# Nice bar plot of the top features
+xgb.plot.importance(imp, top_n = 20)
+
+shap_mat <- predict(final_fit_extra_cancel, dtest_xg_extra_cancel, predcontrib = TRUE)
+
+shap_df <- as.data.frame(shap_mat)
+# Drop the BIAS term for per-feature summaries
+feat_cols <- setdiff(colnames(shap_df), "BIAS")
+
+# Mean |SHAP| per feature = global importance ranking
+avg_abs_shap <- sort(colMeans(abs(shap_df[ , feat_cols, drop = FALSE])), decreasing = TRUE)
+
+# View the top 20
+head(avg_abs_shap, 20)
+
+# Optional: quick ggplot bar chart of top 20 SHAP importances
+library(ggplot2)
+topN <- 20
+plot_df <- data.frame(
+  feature = names(avg_abs_shap)[1:topN],
+  mean_abs_shap = as.numeric(avg_abs_shap[1:topN])
+)
+ggplot(plot_df, aes(x = reorder(feature, mean_abs_shap), y = mean_abs_shap)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Feature", y = "Mean |SHAP|", title = "SHAP Feature Importance (Test Set)")
+```
+
+
+```{r}
+y_true_extra_cancel <- Test_Data_xg_extra_cancel$boost_chosen
+X_test_extra_cancel <- as.data.frame(Test_Data_xg_extra_cancel)  # original test data frame (not the DMatrix)
+base_prob_extra_cancel <- pred_prob_xg_extra_cancel
+base_auc_extra_cancel <- pr_auc_vec(y_true_extra_cancel, base_prob_extra_cancel)
+
+set.seed(1)
+perm_drop <- sapply(setdiff(names(X_test_extra_cancel), "boost_chosen"), function(feat) {
+  X_perm <- X_test_extra_cancel
+  X_perm[[feat]] <- sample(X_perm[[feat]])  # permute single column
+
+  # Rebuild design matrix and predict
+  X_perm_mm <- sparse.model.matrix(boost_chosen ~ . - 1, data = X_perm)
+  d_perm <- xgb.DMatrix(X_perm_mm)
+  prob_perm <- predict(final_fit_extra_cancel, d_perm)
+
+  # PR-AUC drop
+  base_auc_extra_cancel - pr_auc_vec(y_true_extra_cancel, prob_perm)
+})
+
+# Larger drop = more important
+perm_importance <- sort(perm_drop, decreasing = TRUE)
+head(perm_importance, 20)
+```
+
+
+
+
+```{r}
+set.seed(101)
+index_gbm_specified <- createDataPartition(df_xgboost$specified_items, p = 0.8, list = FALSE)
+Train_Data_xg_specified<- df_xgboost[index_gbm_specified,]
+Test_Data_xg_specified <- df_xgboost[-index_gbm_specified,]
+
+names(Train_Data_xg_specified) <- make.names(names(Train_Data_xg_specified), unique = TRUE)
+names(Test_Data_xg_specified)  <- make.names(names(Test_Data_xg_specified),  unique = TRUE)
+
+X_train_xg_specified <- sparse.model.matrix(specified_items ~ . - 1, data = Train_Data_xg_specified)
+y_train_xg_specified <- Train_Data_xg_specified$specified_items == 1
+dtrain_xg_specified <- xgb.DMatrix(X_train_xg_specified, label = y_train_xg_specified)
+
+neg <- sum(y_train_xg_specified == 0); pos <- sum(y_train_xg_specified == 1)
+spw <- neg / pos
+
+grid_xg <- expand.grid(
+  eta              = c(0.05, 0.1),
+  max_depth        = c(6),
+  min_child_weight = c(5, 10),
+  subsample        = c(0.8),
+  colsample_bytree = c(0.8),
+  lambda           = c(1, 3)
+)
+
+best_specified <- list(score = -Inf, iter = NA, params = NULL)
+
+for (i in seq_len(nrow(grid_xg))) {
+  p <- grid_xg[i, ]
+
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "auc",
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = p$lambda,
+    scale_pos_weight = spw
+  )
+
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain_xg_specified,
+    nrounds = 2000,
+    nfold = 5,
+    stratified = TRUE,
+    early_stopping_rounds = 200,
+    verbose = 0
+  )
+
+  score <- cv$evaluation_log$test_auc_mean[cv$best_iteration]
+  if (!is.na(score) && score > best_specified$score) {
+    best_specified$score <- score
+    best_specified$iter  <- cv$best_iteration
+    best_specified$params <- params
+  }
+}
+
+best_specified$score
+best_specified$iter
+best_specified$params
+
+X_test_xg_specified <- sparse.model.matrix(specified_items ~ . - 1, data = Test_Data_xg_specified)
+dtest_xg_specified <- xgb.DMatrix(X_test_xg_specified)
+
+final_fit_specified <- xgb.train(
+  params  = best_specified$params,
+  data    = dtrain_xg_specified,
+  nrounds = best_specified$iter,
+  verbose = 0
+)
+
+test_conf_matrix_xg_specified <- Test_Data_xg_specified
+
+test_conf_matrix_xg_specified$specified_items <- factor(ifelse(test_conf_matrix_xg_specified$specified_items == 1, "YES", "NO"), levels = c("NO","YES"))
+
+pred_prob_xg_specified <- predict(final_fit_specified, dtest_xg_specified)
+pred_cls_xg_specified <- factor(ifelse(pred_prob_xg_specified > 0.5, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_specified <- confusionMatrix(pred_cls_xg_specified, test_conf_matrix_xg_specified$specified_items, positive = "YES")
+cm_xg_specified
+```
+
+
+
+
+
+```{r}
+imp <- xgb.importance(
+  feature_names = colnames(X_train_xg_specified),
+  model = final_fit_specified
+)
+
+# Top 20 features (table)
+head(imp, 20)
+
+# Nice bar plot of the top features
+xgb.plot.importance(imp, top_n = 20)
+
+shap_mat <- predict(final_fit_specified, dtest_xg_specified, predcontrib = TRUE)
+
+shap_df <- as.data.frame(shap_mat)
+# Drop the BIAS term for per-feature summaries
+feat_cols <- setdiff(colnames(shap_df), "BIAS")
+
+# Mean |SHAP| per feature = global importance ranking
+avg_abs_shap <- sort(colMeans(abs(shap_df[ , feat_cols, drop = FALSE])), decreasing = TRUE)
+
+# View the top 20
+head(avg_abs_shap, 20)
+
+topN <- 20
+plot_df <- data.frame(
+  feature = names(avg_abs_shap)[1:topN],
+  mean_abs_shap = as.numeric(avg_abs_shap[1:topN])
+)
+ggplot(plot_df, aes(x = reorder(feature, mean_abs_shap), y = mean_abs_shap)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Feature", y = "Mean |SHAP|", title = "SHAP Feature Importance (Test Set)")
+```
+
+```{r}
+y_true_specified <- Test_Data_xg_specified$specified_items
+X_test_specified <- as.data.frame(Test_Data_xg_specified)
+base_prob_specified <- pred_prob_xg_specified
+base_auc_specified <- pr_auc_vec(y_true_specified, base_prob_specified)
+
+set.seed(1)
+perm_drop <- sapply(setdiff(names(X_test_specified), "specified_items"), function(feat) {
+  X_perm <- X_test_specified
+  X_perm[[feat]] <- sample(X_perm[[feat]])  # permute single column
+
+  # Rebuild design matrix and predict
+  X_perm_mm <- sparse.model.matrix(specified_items ~ . - 1, data = X_perm)
+  d_perm <- xgb.DMatrix(X_perm_mm)
+  prob_perm <- predict(final_fit_specified, d_perm)
+
+  # PR-AUC drop
+  base_auc_specified - pr_auc_vec(y_true_specified, prob_perm)
+})
+
+# Larger drop = more important
+perm_importance <- sort(perm_drop, decreasing = TRUE)
+head(perm_importance, 20)
+```
+
+
+
+```{r}
+set.seed(101)
+index_gbm_gadget <- createDataPartition(df_xgboost$gadget_cover, p = 0.8, list = FALSE)
+Train_Data_xg_gadget<- df_xgboost[index_gbm_gadget,]
+Test_Data_xg_gadget <- df_xgboost[-index_gbm_gadget,]
+
+names(Train_Data_xg_gadget) <- make.names(names(Train_Data_xg_gadget), unique = TRUE)
+names(Test_Data_xg_gadget)  <- make.names(names(Test_Data_xg_gadget),  unique = TRUE)
+
+X_train_xg_gadget <- sparse.model.matrix(gadget_cover ~ . - 1, data = Train_Data_xg_gadget)
+y_train_xg_gadget <- Train_Data_xg_gadget$gadget_cover == 1
+dtrain_xg_gadget <- xgb.DMatrix(X_train_xg_gadget, label = y_train_xg_gadget)
+
+neg <- sum(y_train_xg_gadget == 0); pos <- sum(y_train_xg_gadget == 1)
+spw <- neg / pos
+
+grid_xg <- expand.grid(
+  eta              = c(0.05, 0.1),
+  max_depth        = c(6),
+  min_child_weight = c(5, 10),
+  subsample        = c(0.8),
+  colsample_bytree = c(0.8),
+  lambda           = c(1, 3)
+)
+
+best_gadget <- list(score = -Inf, iter = NA, params = NULL)
+
+for (i in seq_len(nrow(grid_xg))) {
+  p <- grid_xg[i, ]
+  
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "auc",
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = p$lambda,
+    scale_pos_weight = spw
+  )
+  
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain_xg_gadget,
+    nrounds = 2000,
+    nfold = 5,
+    stratified = TRUE,
+    early_stopping_rounds = 200,
+    verbose = 0
+  )
+  
+  score <- cv$evaluation_log$test_auc_mean[cv$best_iteration]
+  if (!is.na(score) && score > best_gadget$score) {
+    best_gadget$score <- score
+    best_gadget$iter  <- cv$best_iteration
+    best_gadget$params <- params
+  }
+}
+
+best_gadget$score
+best_gadget$iter
+best_gadget$params
+
+X_test_xg_gadget <- sparse.model.matrix(gadget_cover ~ . - 1, data = Test_Data_xg_gadget)
+dtest_xg_gadget <- xgb.DMatrix(X_test_xg_gadget)
+
+final_fit_gadget <- xgb.train(
+  params  = best_gadget$params,
+  data    = dtrain_xg_gadget,
+  nrounds = best_gadget$iter,
+  verbose = 0
+)
+
+test_conf_matrix_xg_gadget <- Test_Data_xg_gadget
+
+test_conf_matrix_xg_gadget$gadget_cover <- factor(ifelse(test_conf_matrix_xg_gadget$gadget_cover == 1, "YES", "NO"), levels = c("NO","YES"))
+
+pred_prob_xg_gadget <- predict(final_fit_gadget, dtest_xg_gadget)
+pred_cls_xg_gadget <- factor(ifelse(pred_prob_xg_gadget > 0.5, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_gadget <- confusionMatrix(pred_cls_xg_gadget, test_conf_matrix_xg_gadget$gadget_cover, positive = "YES")
+cm_xg_gadget
+```
+
+```{r}
+imp <- xgb.importance(
+  feature_names = colnames(X_train_xg_gadget),
+  model = final_fit_gadget
+)
+
+# Top 20 features (table)
+head(imp, 20)
+
+# Nice bar plot of the top features
+xgb.plot.importance(imp, top_n = 20)
+
+shap_mat <- predict(final_fit_gadget, dtest_xg_gadget, predcontrib = TRUE)
+
+shap_df <- as.data.frame(shap_mat)
+# Drop the BIAS term for per-feature summaries
+feat_cols <- setdiff(colnames(shap_df), "BIAS")
+
+# Mean |SHAP| per feature = global importance ranking
+avg_abs_shap <- sort(colMeans(abs(shap_df[ , feat_cols, drop = FALSE])), decreasing = TRUE)
+
+# View the top 20
+head(avg_abs_shap, 20)
+
+topN <- 20
+plot_df <- data.frame(
+  feature = names(avg_abs_shap)[1:topN],
+  mean_abs_shap = as.numeric(avg_abs_shap[1:topN])
+)
+ggplot(plot_df, aes(x = reorder(feature, mean_abs_shap), y = mean_abs_shap)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Feature", y = "Mean |SHAP|", title = "SHAP Feature Importance (Test Set)")
+
+```
+
+```{r}
+y_true_gadget <- Test_Data_xg_gadget$gadget_cover
+X_test_gadget <- as.data.frame(Test_Data_xg_gadget)  # original test data frame (not the DMatrix)
+base_prob_gadget <- pred_prob_xg_gadget
+base_auc_gadget <- pr_auc_vec(y_true_gadget, base_prob_gadget)
+
+set.seed(1)
+perm_drop <- sapply(setdiff(names(X_test_gadget), "gadget_cover"), function(feat) {
+  X_perm <- X_test_gadget
+  X_perm[[feat]] <- sample(X_perm[[feat]])  # permute single column
+  
+  # Rebuild design matrix and predict
+  X_perm_mm <- sparse.model.matrix(gadget_cover ~ . - 1, data = X_perm)
+  d_perm <- xgb.DMatrix(X_perm_mm)
+  prob_perm <- predict(final_fit_gadget, d_perm)
+  
+  # PR-AUC drop
+  base_auc_gadget - pr_auc_vec(y_true_gadget, prob_perm)
+})
+
+# Larger drop = more important
+perm_importance <- sort(perm_drop, decreasing = TRUE)
+head(perm_importance, 20)
+```
+
+
+
+```{r}
+set.seed(101)
+index_gbm_medical <- createDataPartition(df_xgboost$medical_conditions, p = 0.8, list = FALSE)
+Train_Data_xg_medical<- df_xgboost[index_gbm_medical,]
+Test_Data_xg_medical <- df_xgboost[-index_gbm_medical,]
+
+names(Train_Data_xg_medical) <- make.names(names(Train_Data_xg_medical), unique = TRUE)
+names(Test_Data_xg_medical)  <- make.names(names(Test_Data_xg_medical),  unique = TRUE)
+set.seed(2025)
+idx_inner <- createDataPartition(Train_Data_xg_medical$medical_conditions, p = 0.8, list = FALSE)
+Train_inner <- Train_Data_xg_medical[idx_inner, ]
+Valid_inner <- Train_Data_xg_medical[-idx_inner, ]
+
+X_all   <- sparse.model.matrix(medical_conditions ~ . - 1, data = rbind(Train_inner, Valid_inner))
+y_all   <- as.numeric(c(Train_inner$medical_conditions, Valid_inner$medical_conditions) == 1)
+
+n_tr    <- nrow(Train_inner)
+X_train <- X_all[seq_len(n_tr), , drop = FALSE]
+X_valid <- X_all[(n_tr + 1):nrow(X_all), , drop = FALSE]
+
+y_train <- y_all[seq_len(n_tr)]
+y_valid <- y_all[(n_tr + 1):length(y_all)]
+
+dtrain_xg_medical <- xgb.DMatrix(X_train, label = y_train)
+dvalid_xg_medical <- xgb.DMatrix(X_valid, label = y_valid)
+
+neg <- sum(y_train == 0); pos <- sum(y_train == 1)
+spw <- neg / max(1, pos)   # guard against divide-by-zero
+
+grid_xg <- expand.grid(
+  eta              = c(0.05, 0.1),
+  max_depth        = c(6),
+  min_child_weight = c(5, 10),
+  subsample        = c(0.8),
+  colsample_bytree = c(0.8),
+  lambda           = c(1, 3)
+)
+
+best_medical <- list(score = -Inf, iter = NA, params = NULL)
+
+for (i in seq_len(nrow(grid_xg))) {
+  p <- grid_xg[i, ]
+
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "auc",
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = p$lambda,
+    scale_pos_weight = spw
+  )
+
+  # CHANGED: use a fixed validation set via watchlist + early stopping
+  fit <- xgb.train(
+    params = params,
+    data = dtrain_xg_medical,
+    nrounds = 2000,
+    watchlist = list(train = dtrain_xg_medical, eval = dvalid_xg_medical),
+    early_stopping_rounds = 200,
+    maximize = TRUE,
+    verbose = 0
+  )
+
+  # CHANGED: get validation AUC at best iteration
+  score <- as.numeric(fit$best_score)
+  if (is.finite(score) && score > best_medical$score) {
+    best_medical$score  <- score
+    best_medical$iter   <- fit$best_iteration
+    best_medical$params <- params
+  }
+}
+
+best_medical$score
+best_medical$iter
+best_medical$params
+```
+
+
+```{r}
+X_test_xg_medical <- sparse.model.matrix(medical_conditions ~ . - 1, data = Test_Data_xg_medical)
+dtest_xg_medical <- xgb.DMatrix(X_test_xg_medical)
+
+final_fit_medical <- xgb.train(
+  params  = best_medical$params,
+  data    = dtrain_xg_medical,
+  nrounds = best_medical$iter,
+  verbose = 0
+)
+
+test_conf_matrix_xg_medical <- Test_Data_xg_medical
+
+test_conf_matrix_xg_medical$medical_conditions <- factor(ifelse(test_conf_matrix_xg_medical$medical_conditions == 1, "YES", "NO"), levels = c("NO","YES"))
+
+pred_prob_xg_medical <- predict(final_fit_medical, dtest_xg_medical)
+pred_cls_xg_medical <- factor(ifelse(pred_prob_xg_medical > 0.5, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_medical <- confusionMatrix(pred_cls_xg_medical, test_conf_matrix_xg_medical$medical_conditions, positive = "YES")
+cm_xg_medical
+```
+
+
+
+```{r}
+imp <- xgb.importance(
+  feature_names = colnames(X_train_xg_medical),
+  model = final_fit_medical
+)
+
+# Top 20 features (table)
+head(imp, 20)
+
+# Nice bar plot of the top features
+xgb.plot.importance(imp, top_n = 20)
+
+shap_mat <- predict(final_fit_medical, dtest_xg_medical, predcontrib = TRUE)
+
+shap_df <- as.data.frame(shap_mat)
+# Drop the BIAS term for per-feature summaries
+feat_cols <- setdiff(colnames(shap_df), "BIAS")
+
+# Mean |SHAP| per feature = global importance ranking
+avg_abs_shap <- sort(colMeans(abs(shap_df[ , feat_cols, drop = FALSE])), decreasing = TRUE)
+
+# View the top 20
+head(avg_abs_shap, 20)
+
+topN <- 20
+plot_df <- data.frame(
+  feature = names(avg_abs_shap)[1:topN],
+  mean_abs_shap = as.numeric(avg_abs_shap[1:topN])
+)
+ggplot(plot_df, aes(x = reorder(feature, mean_abs_shap), y = mean_abs_shap)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Feature", y = "Mean |SHAP|", title = "SHAP Feature Importance (Test Set)")
+
+```
+
+
+```{r}
+y_true_medical <- Test_Data_xg_medical$medical_conditions
+X_test_medical <- as.data.frame(Test_Data_xg_medical)  # original test data frame (not the DMatrix)
+base_prob_medical <- pred_prob_xg_medical
+base_auc_medical <- pr_auc_vec(y_true_medical, base_prob_medical)
+
+set.seed(1)
+perm_drop <- sapply(setdiff(names(X_test_medical), "medical_conditions"), function(feat) {
+  X_perm <- X_test_medical
+  X_perm[[feat]] <- sample(X_perm[[feat]])  # permute single column
+  
+  # Rebuild design matrix and predict
+  X_perm_mm <- sparse.model.matrix(medical_conditions ~ . - 1, data = X_perm)
+  d_perm <- xgb.DMatrix(X_perm_mm)
+  prob_perm <- predict(final_fit_medical, d_perm)
+  
+  # PR-AUC drop
+  base_auc_medical - pr_auc_vec(y_true_medical, prob_perm)
+})
+
+# Larger drop = more important
+perm_importance <- sort(perm_drop, decreasing = TRUE)
+head(perm_importance, 20)
+```
+
+
+
+
+```{r}
+df_medical <- df_xgboost %>%
+  select(-specified_items, -gadget_cover)
+
+set.seed(101)
+index_gbm_medical <- createDataPartition(df_medical$medical_conditions, p = 0.8, list = FALSE)
+Train_Data_xg_medical<- df_medical[index_gbm_medical,]
+Test_Data_xg_medical <- df_medical[-index_gbm_medical,]
+
+names(Train_Data_xg_medical) <- make.names(names(Train_Data_xg_medical), unique = TRUE)
+names(Test_Data_xg_medical)  <- make.names(names(Test_Data_xg_medical),  unique = TRUE)
+set.seed(2025)
+idx_inner <- createDataPartition(Train_Data_xg_medical$medical_conditions, p = 0.8, list = FALSE)
+Train_inner <- Train_Data_xg_medical[idx_inner, ]
+Valid_inner <- Train_Data_xg_medical[-idx_inner, ]
+
+X_all   <- sparse.model.matrix(medical_conditions ~ . - 1, data = rbind(Train_inner, Valid_inner))
+y_all   <- as.numeric(c(Train_inner$medical_conditions, Valid_inner$medical_conditions) == 1)
+
+n_tr    <- nrow(Train_inner)
+X_train <- X_all[seq_len(n_tr), , drop = FALSE]
+X_valid <- X_all[(n_tr + 1):nrow(X_all), , drop = FALSE]
+
+y_train <- y_all[seq_len(n_tr)]
+y_valid <- y_all[(n_tr + 1):length(y_all)]
+
+dtrain_xg_medical <- xgb.DMatrix(X_train, label = y_train)
+dvalid_xg_medical <- xgb.DMatrix(X_valid, label = y_valid)
+
+neg <- sum(y_train == 0); pos <- sum(y_train == 1)
+spw <- neg / max(1, pos)   # guard against divide-by-zero
+
+grid_xg <- expand.grid(
+  eta              = c(0.05, 0.1),
+  max_depth        = c(6),
+  min_child_weight = c(5, 10),
+  subsample        = c(0.8),
+  colsample_bytree = c(0.8),
+  lambda           = c(1, 3)
+)
+
+best_medical <- list(score = -Inf, iter = NA, params = NULL)
+
+for (i in seq_len(nrow(grid_xg))) {
+  p <- grid_xg[i, ]
+
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "auc",
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = p$lambda,
+    scale_pos_weight = spw
+  )
+
+  # CHANGED: use a fixed validation set via watchlist + early stopping
+  fit <- xgb.train(
+    params = params,
+    data = dtrain_xg_medical,
+    nrounds = 2000,
+    watchlist = list(train = dtrain_xg_medical, eval = dvalid_xg_medical),
+    early_stopping_rounds = 200,
+    maximize = TRUE,
+    verbose = 0
+  )
+
+  # CHANGED: get validation AUC at best iteration
+  score <- as.numeric(fit$best_score)
+  if (is.finite(score) && score > best_medical$score) {
+    best_medical$score  <- score
+    best_medical$iter   <- fit$best_iteration
+    best_medical$params <- params
+  }
+}
+
+best_medical$score
+best_medical$iter
+best_medical$params
+```
+
+
+```{r}
+X_test_xg_medical <- sparse.model.matrix(medical_conditions ~ . - 1, data = Test_Data_xg_medical)
+dtest_xg_medical <- xgb.DMatrix(X_test_xg_medical)
+
+final_fit_medical <- xgb.train(
+  params  = best_medical$params,
+  data    = dtrain_xg_medical,
+  nrounds = best_medical$iter,
+  verbose = 0
+)
+
+test_conf_matrix_xg_medical <- Test_Data_xg_medical
+
+test_conf_matrix_xg_medical$medical_conditions <- factor(ifelse(test_conf_matrix_xg_medical$medical_conditions == 1, "YES", "NO"), levels = c("NO","YES"))
+
+pred_prob_xg_medical <- predict(final_fit_medical, dtest_xg_medical)
+pred_cls_xg_medical <- factor(ifelse(pred_prob_xg_medical > 0.5, "YES", "NO"), levels = c("NO","YES"))
+cm_xg_medical <- confusionMatrix(pred_cls_xg_medical, test_conf_matrix_xg_medical$medical_conditions, positive = "YES")
+cm_xg_medical
+```
+
+
+
+```{r}
+imp <- xgb.importance(
+  feature_names = colnames(X_train),
+  model = final_fit_medical
+)
+
+head(imp, 20)
+
+# Nice bar plot of the top features
+xgb.plot.importance(imp, top_n = 20)
+
+shap_mat <- predict(final_fit_medical, dtest_xg_medical, predcontrib = TRUE)
+
+shap_df <- as.data.frame(shap_mat)
+# Drop the BIAS term for per-feature summaries
+feat_cols <- setdiff(colnames(shap_df), "BIAS")
+
+# Mean |SHAP| per feature = global importance ranking
+avg_abs_shap <- sort(colMeans(abs(shap_df[ , feat_cols, drop = FALSE])), decreasing = TRUE)
+
+# View the top 20
+head(avg_abs_shap, 20)
+
+topN <- 20
+plot_df <- data.frame(
+  feature = names(avg_abs_shap)[1:topN],
+  mean_abs_shap = as.numeric(avg_abs_shap[1:topN])
+)
+ggplot(plot_df, aes(x = reorder(feature, mean_abs_shap), y = mean_abs_shap)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Feature", y = "Mean |SHAP|", title = "SHAP Feature Importance (Test Set)")
+
+```
+
+
+```{r}
+y_true_medical <- Test_Data_xg_medical$medical_conditions
+X_test_medical <- as.data.frame(Test_Data_xg_medical)  # original test data frame (not the DMatrix)
+base_prob_medical <- pred_prob_xg_medical
+base_auc_medical <- pr_auc_vec(y_true_medical, base_prob_medical)
+
+set.seed(1)
+perm_drop <- sapply(setdiff(names(X_test_medical), "medical_conditions"), function(feat) {
+  X_perm <- X_test_medical
+  X_perm[[feat]] <- sample(X_perm[[feat]])  # permute single column
+  
+  # Rebuild design matrix and predict
+  X_perm_mm <- sparse.model.matrix(medical_conditions ~ . - 1, data = X_perm)
+  d_perm <- xgb.DMatrix(X_perm_mm)
+  prob_perm <- predict(final_fit_medical, d_perm)
+  
+  # PR-AUC drop
+  base_auc_medical - pr_auc_vec(y_true_medical, prob_perm)
+})
+
+# Larger drop = more important
+perm_importance <- sort(perm_drop, decreasing = TRUE)
+head(perm_importance, 20)
+```
+
+
+
+
+```{r}
+gini_score <- function(y_true, y_prob) {
+  roc_obj <- roc(response = y_true, predictor = y_prob, quiet = TRUE, levels = c(0,1), direction = "<")
+  gini_from_auc(auc(roc_obj))
+}
+
+gini_from_auc <- function(a) 2*as.numeric(a) - 1
+
+roc_obj_adventure <- roc(Test_Data_xg_adventure$boost_chosen, pred_prob_xg_adventure_test1, quiet = TRUE)
+adventure_auc <- pROC::auc(roc_obj_adventure)
+
+roc_obj_cruise <- roc(Test_Data_xg_cruise$boost_chosen, pred_prob_xg_cruise, quiet = TRUE)
+cruise_auc <- pROC::auc(roc_obj_cruise)
+
+roc_obj_motor <- roc(Test_Data_xg_motor$boost_chosen, pred_prob_xg_motor, quiet = TRUE)
+motor_auc <- pROC::auc(roc_obj_motor)
+
+roc_obj_rental <- roc(Test_Data_xg_rental$boost_chosen, pred_prob_xg_rental, quiet = TRUE)
+rental_auc <- pROC::auc(roc_obj_rental)
+
+roc_obj_snow <- roc(Test_Data_xg_snow$boost_chosen, pred_prob_xg_snow, quiet = TRUE)
+snow_auc <- pROC::auc(roc_obj_snow)
+
+# Ensure names match your objects:
+roc_obj_ec <- roc(Test_Data_xg_extra_cancel$boost_chosen, pred_prob_xg_extra_cancel, quiet = TRUE)
+ec_auc <- pROC::auc(roc_obj_ec)
+
+roc_obj_medical <- roc(Test_Data_xg_medical$medical_conditions, pred_prob_xg_medical, quiet = TRUE)
+medical_auc <- pROC::auc(roc_obj_medical)
+
+roc_obj_specified <- roc(Test_Data_xg_specified$specified_items, pred_prob_xg_specified, quiet = TRUE)
+specified_auc <- pROC::auc(roc_obj_specified)
+
+roc_obj_gadget <- roc(Test_Data_xg_gadget$gadget_cover, pred_prob_xg_gadget, quiet = TRUE)
+gadget_auc <- pROC::auc(roc_obj_gadget)
+
+# --- Extend your table ---
+auc_gini_test <- tibble(
+  segment = c("Adventure","Cruise","Motor","Rental","Snow","Extra Cancel",
+              "Medical","Specified Items","Gadget Cover"),
+  auc     = as.numeric(c(adventure_auc, cruise_auc, motor_auc, rental_auc, snow_auc, ec_auc,
+                         medical_auc, specified_auc, gadget_auc))
+) %>%
+  mutate(gini = gini_from_auc(auc)) %>%
+  arrange(desc(gini))
+
+auc_gini_test
+
+```
+
+```{r}
+# --- GBM ROC/AUCs ---
+roc_obj_adventure_gbm <- roc(Test_Data_gbm_adventure$boost_chosen, gbm_best_probpred_adventure, quiet = TRUE)
+adventure_auc_gbm <- pROC::auc(roc_obj_adventure_gbm)
+
+roc_obj_cruise_gbm <- roc(Test_Data_gbm_cruise$boost_chosen, gbm_best_probpred_cruise, quiet = TRUE)
+cruise_auc_gbm <- pROC::auc(roc_obj_cruise_gbm)
+
+roc_obj_motor_gbm <- roc(Test_Data_gbm_motor$boost_chosen, gbm_best_probpred_motor, quiet = TRUE)
+motor_auc_gbm <- pROC::auc(roc_obj_motor_gbm)
+
+roc_obj_rental_gbm <- roc(Test_Data_gbm_rental$boost_chosen, gbm_best_probpred_rental, quiet = TRUE)
+rental_auc_gbm <- pROC::auc(roc_obj_rental_gbm)
+
+roc_obj_snow_gbm <- roc(Test_Data_gbm_snow$boost_chosen, gbm_best_probpred_snow, quiet = TRUE)
+snow_auc_gbm <- pROC::auc(roc_obj_snow_gbm)
+
+roc_obj_ec_gbm <- roc(Test_Data_gbm_extra_cancel$boost_chosen, gbm_best_probpred_extra_cancel, quiet = TRUE)
+ec_auc_gbm <- pROC::auc(roc_obj_ec_gbm)
+
+roc_obj_medical_gbm <- roc(Test_Data_gbm_medical$medical_conditions, gbm_best_probpred_medical,   quiet = TRUE)
+medical_auc_gbm <- pROC::auc(roc_obj_medical_gbm)
+
+roc_obj_specified_gbm <- roc(Test_Data_gbm_specified$specified_items,  gbm_best_probpred_specified, quiet = TRUE)
+specified_auc_gbm <- pROC::auc(roc_obj_specified_gbm)
+
+roc_obj_gadget_gbm <- roc(Test_Data_gbm_gadget$gadget_cover, gbm_best_probpred_gadget, quiet = TRUE)
+gadget_auc_gbm <- pROC::auc(roc_obj_gadget_gbm)
+
+# --- Extend your GBM table ---
+auc_gini_test_gbm <- tibble(
+  segment = c("Adventure","Cruise","Motor","Rental","Snow","Extra Cancel",
+              "Medical","Specified Items","Gadget Cover"),
+  auc     = as.numeric(c(adventure_auc_gbm, cruise_auc_gbm, motor_auc_gbm, rental_auc_gbm,
+                         snow_auc_gbm, ec_auc_gbm, medical_auc_gbm, specified_auc_gbm, gadget_auc_gbm))
+) %>%
+  mutate(gini = gini_from_auc(auc)) %>%
+  arrange(desc(gini))
+
+auc_gini_test_gbm
+
+```
+
+```{r}
+auc_gini_test_xgb <- auc_gini_test %>% mutate(model = "XGBoost")
+auc_gini_test_gbm2 <- auc_gini_test_gbm %>% mutate(model = "GBM")
+
+auc_gini_test_all <- bind_rows(auc_gini_test_xgb, auc_gini_test_gbm2) %>%
+  arrange(segment, desc(gini))
+
+auc_gini_test_all
+```
+
+
+
+```{r}
+# ---------- Helper to make a ROC dataframe ----------
+make_roc_df <- function(y, prob, segment, model) {
+  r <- roc(response = y, predictor = prob, levels = c(0,1), direction = "<", quiet = TRUE)
+  d <- pROC::ggroc(r)$data %>% as_tibble()
+  d$segment <- segment
+  d$model   <- model
+  d$auc     <- as.numeric(pROC::auc(r))
+  d
+}
+
+# ---------- Wire up all y/prob pairs ----------
+# XGBoost
+y_xgb <- list(
+  Adventure    = Test_Data_xg_adventure$boost_chosen,
+  Cruise       = Test_Data_xg_cruise$boost_chosen,
+  Motor        = Test_Data_xg_motor$boost_chosen,
+  Rental       = Test_Data_xg_rental$boost_chosen,
+  Snow         = Test_Data_xg_snow$boost_chosen,
+  `Extra Cancel` = Test_Data_xg_extra_cancel$boost_chosen
+)
+prob_xgb <- list(
+  Adventure    = pred_prob_xg_adventure_test1,
+  Cruise       = pred_prob_xg_cruise,
+  Motor        = pred_prob_xg_motor,
+  Rental       = pred_prob_xg_rental,
+  Snow         = pred_prob_xg_snow,
+  `Extra Cancel` = pred_prob_xg_extra_cancel
+)
+
+# GBM
+y_gbm <- list(
+  Adventure    = Test_Data_gbm_adventure$boost_chosen,
+  Cruise       = Test_Data_gbm_cruise$boost_chosen,
+  Motor        = Test_Data_gbm_motor$boost_chosen,
+  Rental       = Test_Data_gbm_rental$boost_chosen,
+  Snow         = Test_Data_gbm_snow$boost_chosen,
+  `Extra Cancel` = Test_Data_gbm_extra_cancel$boost_chosen
+)
+prob_gbm <- list(
+  Adventure    = gbm_best_probpred_adventure,
+  Cruise       = gbm_best_probpred_cruise,
+  Motor        = gbm_best_probpred_motor,
+  Rental       = gbm_best_probpred_rental,
+  Snow         = gbm_best_probpred_snow,
+  `Extra Cancel` = gbm_best_probpred_extra_cancel
+)
+
+
+# XGBoost (new)
+y_xgb_new <- list(
+  Medical          = Test_Data_xg_medical$medical_conditions,
+  `Specified Items`= Test_Data_xg_specified$specified_items,
+  `Gadget Cover`   = Test_Data_xg_gadget$gadget_cover
+)
+prob_xgb_new <- list(
+  Medical          = pred_prob_xg_medical,
+  `Specified Items`= pred_prob_xg_specified,
+  `Gadget Cover`   = pred_prob_xg_gadget
+)
+
+# GBM (new)
+y_gbm_new <- list(
+  Medical          = Test_Data_gbm_medical$medical_conditions,
+  `Specified Items`= Test_Data_gbm_specified$specified_items,
+  `Gadget Cover`   = Test_Data_gbm_gadget$gadget_cover
+)
+prob_gbm_new <- list(
+  Medical          = gbm_best_probpred_medical,
+  `Specified Items`= gbm_best_probpred_specified,
+  `Gadget Cover`   = gbm_best_probpred_gadget
+)
+
+# Build ROC dfs for the new segments using your existing helper
+roc_list_xgb_new <- purrr::map(names(y_xgb_new), ~ make_roc_df(y_xgb_new[[.x]], prob_xgb_new[[.x]], segment = .x, model = "XGBoost"))
+roc_list_gbm_new <- purrr::map(names(y_gbm_new), ~ make_roc_df(y_gbm_new[[.x]], prob_gbm_new[[.x]], segment = .x, model = "GBM"))
+
+roc_df_new  <- dplyr::bind_rows(list_rbind(roc_list_xgb_new),
+                                list_rbind(roc_list_gbm_new))
+
+# Combine with your original roc_df and re-plot
+roc_df_all <- dplyr::bind_rows(roc_df, roc_df_new)
+```
+
+```{r}
+auc_labels_all <- roc_df_all %>%
+  dplyr::distinct(segment, model, auc) %>%
+  dplyr::arrange(segment, model) %>%
+  dplyr::mutate(label = sprintf("%s AUC = %.3f", model, auc),
+                x = 0.58,                              # nudge right a bit
+                y = ifelse(model == "XGBoost", 0.22, 0.12))
+
+# --- Compact AUC table (wide: one row per segment) ---
+auc_wide2 <- auc_wide
+names(auc_wide2) <- sub("^XGBoost$", "XGB", names(auc_wide2))
+names(auc_wide2) <- sub("^GBM$",     "GBM", names(auc_wide2))
+
+tt <- gridExtra::ttheme_minimal(
+  base_size = 12,
+  core = list(
+    fg_params = list(hjust = 0, x = 0.02),              # left align, small inset
+    padding  = grid::unit(c(2.5, 3.5), "pt")            # more vertical & horizontal padding
+  ),
+  colhead = list(
+    fg_params = list(hjust = 0, x = 0.02),
+    padding  = grid::unit(c(2.5, 3.5), "pt")
+  )
+)
+
+tg_small <- gridExtra::tableGrob(auc_wide2, rows = NULL, theme = tt)
+
+# Let letters with descenders (g, p, y) show fully & avoid edge cropping
+tg_small$layout$clip <- "off"
+
+# Give columns some breathing room so ends of strings aren't chopped
+# (first column a bit wider for "Segment" names)
+w <- rep(1.1, ncol(auc_wide2))  # start a bit wider than 1
+w[1] <- 1.8                      # make "Segment" column wider
+tg_small$widths <- grid::unit(w, "null")
+
+# Shift layout split to give the table more space (40% to table)
+main_and_table <- gridExtra::arrangeGrob(
+  p_main_noleg, tg_small,
+  ncol = 2,
+  widths = c(0.60, 0.40)   # try 0.58/0.42 if still tight
+)
+
+# --- Legend below (unchanged helper) ---
+get_legend <- function(p) {
+  g <- ggplotGrob(p + theme(legend.position = "bottom"))
+  idx <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
+  if (length(idx)) g$grobs[[idx]] else NULL
+}
+leg <- get_legend(p_main + guides(color = guide_legend(title = "Model"),
+                                  linetype = guide_legend(title = "Model")))
+
+if (!is.null(leg)) {
+  gridExtra::grid.arrange(main_and_table, leg, ncol = 1, heights = c(10, 1.2))
+} else {
+  gridExtra::grid.arrange(main_and_table)
+}
+
+```
+
+
+
+
+```{r}
+save.image('/Users/michaelwang/Desktop/share_xg_gbm_image.RData')
+```
+
